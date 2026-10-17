@@ -97,9 +97,13 @@ def get_or_create_container(meta):
         c.reload()
         existing=(c.attrs.get("HostConfig",{}).get("PortBindings",{}).get("25565/tcp") or [])
         ports={str(binding.get("HostPort")) for binding in existing}
-        if ports!={str(GAME_PORT)}:
-            # A container created by the old multiport preview must be replaced.
-            # Its /data volume is a bind mount and is never removed.
+        security_options=c.attrs.get("HostConfig",{}).get("SecurityOpt") or []
+        incompatible_security=any(
+            option.startswith("no-new-privileges") for option in security_options
+        )
+        if ports!={str(GAME_PORT)} or incompatible_security:
+            # Migrate legacy ports and containers with an incompatible security option.
+            # The data directory is bind-mounted; removing the container never deletes it.
             c.update(restart_policy={"Name":"no"})
             if running(c):
                 c.stop(timeout=45)
@@ -137,8 +141,7 @@ def get_or_create_container(meta):
         f"itzg/minecraft-server:java{java_version}",name="mcd-"+sid,environment=env,
         volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},
         ports={"25565/tcp":GAME_PORT},mem_limit=f'{meta["ram_gb"]+1}g',
-        nano_cpus=400000000,restart_policy={"Name":"no"},
-        security_opt=["no-new-privileges:true"])
+        nano_cpus=400000000,restart_policy={"Name":"no"})
 
 def activate(sid):
     # The lock covers the entire stop -> start transition, including rollback.
