@@ -249,6 +249,10 @@ def state(meta):
             "ram_gb":meta["ram_gb"],"status":c.status if c else "not-created",
             "is_active":active_id()==meta["id"],
             "whitelist":meta.get("whitelist",[]),
+            "mode":meta.get("mode","zip"),
+            "minecraft_version":meta.get("minecraft_version"),
+            "loader_version":meta.get("loader_version"),
+            "java_version":meta.get("java_version",21),
             "address":f"{HOST}:{GAME_PORT}"}
 
 @app.get("/")
