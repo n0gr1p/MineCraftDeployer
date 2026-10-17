@@ -31,7 +31,10 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .ram-panel input{max-width:125px}
+    .ram-panel label{margin:0}
+    .ram-panel .help{margin:8px 0}
     .player-line{padding:8px 0;border-bottom:1px solid #36505f;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .player-line:last-child{border-bottom:0}
     .player-line strong{margin-right:auto;word-break:break-word}
@@ -105,7 +108,7 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null;
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
       const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
@@ -119,7 +122,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton'))
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton'))
         btn.disabled=value;
     }
     async function doAction(id,cmd,purpose=''){
@@ -142,6 +145,65 @@
         message('Updated '+name+'.');
       }catch(error){message(error.message)}
       finally{setBusy(false);paint()}
+    }
+    async function saveRam(s,ram){
+      if(busy)return;
+      const willRestart=['running','restarting','paused'].includes(s.status);
+      if(willRestart&&!confirm(
+        'Changing '+s.name+' RAM from '+s.ram_gb+' GB to '+ram+
+        ' GB requires stopping and recreating the Minecraft game container. '+
+        'Connected players will be disconnected. Continue?'
+      ))return;
+      setBusy(true);
+      message(willRestart?'Saving RAM and restarting '+s.name+'…':'Saving RAM for '+s.name+'…');
+      try{
+        await request('/servers/'+s.id+'/ram',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ram_gb:ram,restart_running:willRestart})
+        });
+        await refresh(true);
+        openRamId=null;
+        message(willRestart?'RAM updated. Minecraft is restarting; wait for the ready message in Logs.':
+                         'RAM saved. The new allocation will apply the next time this server starts.');
+      }catch(error){
+        message(error.message);
+        await refresh(true);
+      }finally{setBusy(false);paint()}
+    }
+    function ramPanel(s){
+      const panel=document.createElement('div');
+      panel.className='ram-panel';panel.hidden=openRamId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      intro.textContent='Set Minecraft heap memory, between 2 and '+s.max_ram_gb+
+        ' GB. The Docker container uses roughly 1 GB more for overhead.';
+      panel.append(intro);
+      const form=document.createElement('form');form.className='row';
+      const label=document.createElement('label');label.textContent='RAM (GB)';
+      const input=document.createElement('input');
+      input.type='number';input.min=2;input.max=s.max_ram_gb;input.step=1;
+      input.value=s.ram_gb;input.required=true;
+      const inputId='ram-'+s.id;
+      input.id=inputId;label.htmlFor=inputId;
+      const submit=document.createElement('button');
+      submit.type='submit';submit.className='secondary ramButton';submit.textContent='Save RAM';
+      submit.disabled=busy;
+      form.append(label,input,submit);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const requested=Number(input.value);
+        if(!Number.isInteger(requested)||requested<2||requested>s.max_ram_gb){
+          message('Choose a whole number between 2 and '+s.max_ram_gb+' GB.');return;
+        }
+        if(requested===s.ram_gb){message('RAM is already set to '+requested+' GB.');return}
+        saveRam(s,requested);
+      };
+      panel.append(form);
+      if(s.ram_change_pending){
+        const note=document.createElement('p');note.className='help muted';
+        note.textContent='The saved RAM setting will take effect on the next start.';
+        panel.append(note);
+      }
+      return panel;
     }
     function actionButton(text,kind,callback,disabled=false){
       const btn=document.createElement('button');
@@ -250,7 +312,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
@@ -261,7 +323,12 @@
           openPlayersId=openPlayersId===s.id?null:s.id;paint();
         });
         playersBtn.setAttribute('aria-expanded',String(openPlayersId===s.id));
-        box.append(title,details,logs,playersBtn,playerPanel(s));area.append(box);
+        const ramBtn=actionButton('Edit RAM','secondary',()=>{
+          openRamId=openRamId===s.id?null:s.id;paint();
+        });
+        ramBtn.classList.add('ramButton');
+        ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
+        box.append(title,details,logs,playersBtn,ramBtn,playerPanel(s),ramPanel(s));area.append(box);
       }
     }
     async function refresh(quiet=false){
