@@ -224,13 +224,13 @@ def test_invalid_minecraft_player_names_are_rejected(environment):
         assert "Minecraft Java usernames" in resp.json()["detail"]
 
 def server_pack_bytes():
-    config=(
-        "MINECRAFT_VERSION=1.20.1\\n"
-        "MODLOADER=Fabric\\n"
-        "MODLOADER_VERSION=0.19.3\\n"
-        "RECOMMENDED_JAVA_VERSION=17\\n"
-        "JAVA_ARGS=\\\"-Xmx8G -Xms8G\\\"\\n"
-    ).replace("\\n","\\n")
+    config=chr(10).join([
+        "MINECRAFT_VERSION=1.20.1",
+        "MODLOADER=Fabric",
+        "MODLOADER_VERSION=0.19.3",
+        "RECOMMENDED_JAVA_VERSION=17",
+        'JAVA_ARGS="-Xmx8G -Xms8G"',
+    ]) + chr(10)
     out=io.BytesIO()
     with zipfile.ZipFile(out,"w") as z:
         z.writestr("variables.txt",config)
