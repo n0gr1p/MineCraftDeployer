@@ -84,7 +84,7 @@
         <input id="pack" name="pack" type="file" accept=".zip">
         <label for="world">Optional saved world ZIP</label>
         <input id="world" name="world" type="file" accept=".zip">
-        <p class="muted help">ZIP packs currently need a top-level server.jar. World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play. CurseForge API key is optional for the Java 21 runtime.</p>
+        <p class="muted help">Supports ready-to-run server.jar ZIPs and Fabric ServerPackCreator ZIPs (including one ZIP wrapper). World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play. CurseForge API key is optional for the Java 21 runtime.</p>
         <button type="submit">Install Server</button>
       </form>
     </section>
@@ -154,7 +154,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM · '+s.status+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        details.textContent=s.ram_gb+' GB RAM · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
