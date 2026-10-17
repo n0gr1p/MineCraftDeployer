@@ -3,7 +3,10 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      # Bind only to a specified host interface. Keep 127.0.0.1 by default;
+      # set MCD_PORTAL_BIND_IP to your Linux server's LAN IPv4 for family access.
+      # Never forward 8080 from the internet router.
+      - "${MCD_PORTAL_BIND_IP:-127.0.0.1}:8080:8080"
     environment:
       MCD_TOKEN: ${MCD_TOKEN:?Set MCD_TOKEN}
       MCD_DATA: ${MCD_HOST_DATA:?Set MCD_HOST_DATA}
