@@ -303,7 +303,7 @@ Always inspect logs and preserve the data directory before deleting or recreatin
 | Server container shows `exited` | Open **Logs** and read the last relevant error before trying to restart. This is not automatically a network problem. |
 | Player action says the game console isn't ready | The container may be running while Minecraft/RCON is still initializing. Wait for the startup-ready message, then try again; do not repeatedly restart. |
 | **Players** asks for one-time restart | Expected for profiles created before this feature. Confirm at a convenient time when friends aren't playing. |
-| TCP `25565` already in use | Check with `sudo ss -ltnp | grep ':25565'`. Stop an unrelated **old Minecraft service** only after confirming what owns the port. |
+| TCP `25565` already in use | Run `sudo ss -ltnp` and look for `:25565`. Stop an unrelated **old Minecraft service** only after confirming what owns the port. |
 | Can't upload player name with `.` | Java names in this version permit letters, numbers, underscores only (3–16 characters). Don't silently change a real username; Bedrock/Geyser naming requires additional support. |
 
 When asking for help, share the **error message and relevant logs**, but **redact `MCD_TOKEN` and any sensitive configuration**. A modpack can take several minutes to install on first launch. Don't assume a repeated click helps.
