@@ -9,6 +9,7 @@ import docker
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 os.environ.setdefault("MCD_TOKEN", "test-secret-" + "a" * 40)
 os.environ.setdefault("MCD_DATA", tempfile.mkdtemp(prefix="minecraft-deployer-test-"))
@@ -24,7 +25,10 @@ class FakeContainer:
         self.fail_start=fail_start
         self.policy="no"
         self.port=port
-        self.attrs={"HostConfig":{"PortBindings":{"25565/tcp":[{"HostPort":str(port)}]}}}
+        self.commands=[]
+        self.console_ready=True
+        self.attrs={"HostConfig":{"PortBindings":{"25565/tcp":[{"HostPort":str(port)}]}},
+                    "Config":{"Env":[]}}
 
     def reload(self): pass
 
@@ -46,6 +50,21 @@ class FakeContainer:
         assert self.status!="running"
         del self.owner.items[self.sid]
 
+    def exec_run(self,cmd,stdout,stderr):
+        self.commands.append(cmd)
+        if not self.console_ready:
+            return SimpleNamespace(exit_code=1,output=b"RCON connection refused")
+        if cmd[0]!="rcon-cli":
+            raise AssertionError("Only rcon-cli console commands are permitted")
+        phrase={
+            ("whitelist","add"):"Added {name} to the whitelist",
+            ("whitelist","remove"):"Removed {name} from the whitelist",
+            ("op",):"Made {name} a server operator",
+            ("deop",):"Made {name} no longer a server operator"
+        }.get(tuple(cmd[1:-1]))
+        if phrase is None: raise AssertionError("Unexpected Minecraft command: "+str(cmd))
+        return SimpleNamespace(exit_code=0,output=phrase.format(name=cmd[-1]).encode())
+
 
 class FakeContainers:
     def __init__(self):
@@ -63,6 +82,7 @@ class FakeContainers:
         sid=kwargs["name"].removeprefix("mcd-")
         port=kwargs["ports"]["25565/tcp"]
         c=FakeContainer(self,sid,port,fail_start=sid in self.fail_for)
+        c.attrs["Config"]["Env"]=[key+"="+str(val) for key,val in kwargs["environment"].items()]
         self.items[sid]=c
         self.creations.append(kwargs)
         return c
@@ -328,3 +348,96 @@ def test_client_export_zip_rejected_early(environment):
             files={"pack":("client.zip",archive.getvalue(),"application/zip")})
         assert resp.status_code==400
         assert "client-export" in resp.json()["detail"]
+
+
+def player_call(sid,action,name):
+    return portal.manage_player(sid,portal.PlayerCommand(action=action,username=name),
+                                authorization="Bearer "+portal.TOKEN)
+
+
+def test_players_live_rcon_operations_and_persistence(environment):
+    sid=install_profile(portal.ROOT,20)
+    portal.activate(sid)
+    c=environment.containers.items[sid]
+    initial=portal.state(portal.meta_for(sid))
+    assert initial["player_controls_ready"] is True
+    assert c.attrs["Config"]["Env"]
+    assert "EXISTING_WHITELIST_FILE=SKIP" in c.attrs["Config"]["Env"]
+    assert "EXISTING_OPS_FILE=SKIP" in c.attrs["Config"]["Env"]
+    assert "ENABLE_RCON=TRUE" in c.attrs["Config"]["Env"]
+    assert not any(key=="25575/tcp" for key in environment.containers.creations[-1]["ports"])
+
+    result=player_call(sid,"whitelist_add","OtherFriend")
+    assert result["whitelist"]==["TestPlayer","OtherFriend"]
+    result=player_call(sid,"op","OtherFriend")
+    assert result["ops"]==["OtherFriend"]
+    assert [cmd for cmd in c.commands]==[
+        ["rcon-cli","whitelist","add","OtherFriend"],
+        ["rcon-cli","op","OtherFriend"]]
+    assert player_call(sid,"op","OtherFriend")["ops"]==["OtherFriend"]
+    assert len(c.commands)==2
+    with pytest.raises(HTTPException,match="Revoke operator"):
+        player_call(sid,"whitelist_remove","OtherFriend")
+    player_call(sid,"deop","OtherFriend")
+    result=player_call(sid,"whitelist_remove","OtherFriend")
+    assert result["whitelist"]==["TestPlayer"]
+    assert result["ops"]==[]
+    assert portal.meta_for(sid)["whitelist"]==["TestPlayer"]
+    portal.stop_active(sid)
+    portal.activate(sid)
+    assert environment.containers.items[sid] is c
+    assert portal.state(portal.meta_for(sid))["whitelist"]==["TestPlayer"]
+
+
+def test_player_management_rejects_invalid_or_inactive_or_unready(environment):
+    sid=install_profile(portal.ROOT,21)
+    other=install_profile(portal.ROOT,22)
+    portal.activate(other)
+    with pytest.raises(HTTPException) as exc:
+        player_call(sid,"whitelist_add","Friend123")
+    assert exc.value.status_code==409
+
+    with pytest.raises(HTTPException) as exc:
+        player_call(other,"whitelist_add","invalid.name")
+    assert exc.value.status_code==400
+    with pytest.raises(HTTPException,match="Whitelist"):
+        player_call(other,"op","NotListed")
+    assert portal.meta_for(other).get("ops",[])==[]
+
+    old=environment.containers.items[other]
+    old.attrs["Config"]["Env"]=["ENABLE_RCON=FALSE","EXISTING_WHITELIST_FILE=MERGE"]
+    assert portal.state(portal.meta_for(other))["player_controls_ready"] is False
+    with pytest.raises(HTTPException,match="Enable Players"):
+        player_call(other,"whitelist_add","Friend123")
+    portal.activate(other)  # One-time restart/migration on deliberate activation.
+    assert old not in environment.containers.items.values()
+    assert portal.state(portal.meta_for(other))["player_controls_ready"] is True
+    assert player_call(other,"whitelist_add","Friend123")["whitelist"]==["TestPlayer","Friend123"]
+
+
+def test_players_do_not_persist_if_console_rejects_change(environment):
+    sid=install_profile(portal.ROOT,23)
+    portal.activate(sid)
+    c=environment.containers.items[sid]
+    c.console_ready=False
+    with pytest.raises(HTTPException) as exc:
+        player_call(sid,"whitelist_add","Another123")
+    assert exc.value.status_code==409
+    assert portal.meta_for(sid)["whitelist"]==["TestPlayer"]
+    assert len(c.commands)==1
+
+
+def test_players_endpoint_requires_auth_and_validated_actions(environment):
+    sid=install_profile(portal.ROOT,24)
+    portal.activate(sid)
+    with TestClient(portal.app) as http:
+        path="/api/servers/"+sid+"/players"
+        unauth=http.post(path,json={"action":"op","username":"TestPlayer"})
+        assert unauth.status_code==401
+        invalid=http.post(path,headers={"Authorization":"Bearer "+portal.TOKEN},
+                          json={"action":"arbitrary command","username":"TestPlayer"})
+        assert invalid.status_code==422
+        valid=http.post(path,headers={"Authorization":"Bearer "+portal.TOKEN},
+                        json={"action":"op","username":"TestPlayer"})
+        assert valid.status_code==200
+        assert valid.json()["ops"]==["TestPlayer"]
