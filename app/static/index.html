@@ -31,6 +31,14 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .player-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-line{padding:8px 0;border-bottom:1px solid #36505f;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .player-line:last-child{border-bottom:0}
+    .player-line strong{margin-right:auto;word-break:break-word}
+    .player-panel input{max-width:260px}
+    .player-panel button{font-size:.88rem;padding:7px 10px}
+    .player-panel .help{margin:8px 0}
+
     .tag{font-size:.75rem;padding:4px 9px;border-radius:20px;color:#a3ecc0;background:#264c3d;border:1px solid #4b8868}
     .tag.off{color:#d7e0e0;background:#263a42;border-color:#52666b}
     pre{overflow:auto;max-height:320px;white-space:pre-wrap;background:#0a1723;padding:16px;border-radius:9px}
@@ -97,7 +105,7 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false;
+    let token='', servers=[], busy=false,openPlayersId=null;
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
       const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
@@ -111,19 +119,107 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton'))
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton'))
         btn.disabled=value;
     }
-    async function doAction(id,cmd){
+    async function doAction(id,cmd,purpose=''){
       if(busy||!id)return;
       setBusy(true);
-      message(cmd==='activate'?'Switching servers (waiting for world to save and stop)…':cmd+'…');
+      message(purpose==='enableplayers'?'Restarting Minecraft to enable player management…':cmd==='activate'?'Switching servers (waiting for world to save and stop)…':cmd+'…');
       try{
         await request('/servers/'+id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:cmd})});
-        message(cmd==='activate'?'Server selected. Minecraft may still be starting; check logs.':'Done.');
+        message(purpose==='enableplayers'?'Player management enabled. Wait for Minecraft to finish starting before editing players.':cmd==='activate'?'Server selected. Minecraft may still be starting; check logs.':'Done.');
         await refresh(true);
       }catch(error){message(error.message)}
       finally{setBusy(false);paint()}
+    }
+    async function doPlayerAction(sid,action,name){
+      if(busy)return;
+      setBusy(true);message('Updating '+name+'…');
+      try{
+        await request('/servers/'+sid+'/players',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,username:name})});
+        await refresh(true);
+        message('Updated '+name+'.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function actionButton(text,kind,callback,disabled=false){
+      const btn=document.createElement('button');
+      btn.className=(kind||'secondary')+' playerButton';
+      btn.textContent=text;btn.disabled=busy||disabled;btn.onclick=callback;
+      return btn;
+    }
+    function playerPanel(s){
+      const panel=document.createElement('div');panel.className='player-panel';panel.hidden=openPlayersId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      if(!s.is_active || s.status!=='running'){
+        intro.textContent='Select this server and start Minecraft before editing its whitelist or operators.';
+        panel.append(intro);return panel;
+      }
+      if(!s.player_controls_ready){
+        intro.textContent='This server was installed before player management was available. Enabling it requires one Minecraft restart and will disconnect current players.';
+        panel.append(intro);
+        panel.append(actionButton('Enable Players (restart once)','secondary',()=>{
+          if(confirm('Restart '+s.name+' now to enable live whitelist and operator controls? Anyone connected will be disconnected.'))
+            doAction(s.id,'activate','enableplayers');
+        }));
+        return panel;
+      }
+      intro.textContent='Changes take effect immediately when Minecraft is ready. Operator (OP) grants powerful administrator commands; only grant it to someone you trust.';
+      panel.append(intro);
+      const form=document.createElement('form');form.className='row';
+      const input=document.createElement('input');
+      input.placeholder='Minecraft Java username';input.maxLength=16;
+      input.pattern='[A-Za-z0-9_]{3,16}';input.required=true;input.autocomplete='off';
+      input.setAttribute('aria-label','Minecraft Java username');
+      const add=actionButton('Add to whitelist','secondary',()=>{});
+      add.type='submit';
+      form.append(input,add);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const name=input.value.trim();
+        if(!/^[A-Za-z0-9_]{3,16}$/.test(name)){message('Use a valid Minecraft Java username (3–16 letters, numbers or underscores).');return}
+        doPlayerAction(s.id,'whitelist_add',name);
+      };
+      panel.append(form);
+      const list=document.createElement('div');
+      const allowed=s.whitelist||[],ops=s.ops||[];
+      if(!allowed.length){
+        const none=document.createElement('p');none.className='help muted';none.textContent='No whitelisted players yet.';list.append(none);
+      }
+      for(const player of allowed){
+        const row=document.createElement('div');row.className='player-line';
+        const name=document.createElement('strong');name.textContent=player;row.append(name);
+        const operator=ops.some(n=>n.toLowerCase()===player.toLowerCase());
+        const tag=document.createElement('span');tag.className='tag'+(operator?'':' off');tag.textContent=operator?'OP':'Player';row.append(tag);
+        row.append(actionButton(operator?'Revoke OP':'Grant OP','secondary',()=>{
+          if(operator){
+            if(confirm('Revoke operator privileges from '+player+'?'))doPlayerAction(s.id,'deop',player);
+          }else if(confirm('Grant FULL Minecraft operator privileges to '+player+'? This includes powerful server-admin commands.')){
+            doPlayerAction(s.id,'op',player);
+          }
+        }));
+        row.append(actionButton('Remove','danger',()=>{
+          if(confirm('Remove '+player+' from the whitelist? They will no longer be allowed to join.'))
+            doPlayerAction(s.id,'whitelist_remove',player);
+        },operator));
+        if(operator){
+          const note=document.createElement('small');note.textContent='Revoke OP before removing';row.append(note);
+        }
+        list.append(row);
+      }
+      const outsideOps=ops.filter(name=>!allowed.some(p=>p.toLowerCase()===name.toLowerCase()));
+      if(outsideOps.length){
+        const notice=document.createElement('p');notice.className='help muted';
+        notice.textContent='Existing operators outside the whitelist (set outside this portal): '+outsideOps.join(', ');
+        list.append(notice);
+        for(const player of outsideOps){
+          list.append(actionButton('Revoke OP: '+player,'danger',()=>{
+            if(confirm('Revoke operator privileges from '+player+'?'))doPlayerAction(s.id,'deop',player);
+          }));
+        }
+      }
+      panel.append(list);return panel;
     }
     function paint(){
       const selectedBefore=$('serverSelect').value;
@@ -161,7 +257,11 @@
           try{message('');$('logs').textContent=(await request('/servers/'+s.id+'/logs')).logs}
           catch(error){message(error.message)}
         };
-        box.append(title,details,logs);area.append(box);
+        const playersBtn=actionButton('Players','secondary',()=>{
+          openPlayersId=openPlayersId===s.id?null:s.id;paint();
+        });
+        playersBtn.setAttribute('aria-expanded',String(openPlayersId===s.id));
+        box.append(title,details,logs,playersBtn,playerPanel(s));area.append(box);
       }
     }
     async function refresh(quiet=false){
