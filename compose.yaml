@@ -12,6 +12,7 @@ services:
       MCD_DATA: ${MCD_HOST_DATA:?Set MCD_HOST_DATA}
       MCD_PUBLIC_HOST: ${MCD_PUBLIC_HOST:?Set MCD_PUBLIC_HOST}
       MCD_MAX_RAM_GB: ${MCD_MAX_RAM_GB:-12}
+      MCD_GAME_PORT: ${MCD_GAME_PORT:-25565}
       CF_API_KEY: ${CF_API_KEY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
