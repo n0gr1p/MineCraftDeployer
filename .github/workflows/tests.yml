@@ -13,6 +13,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
+      - name: Validate Docker Compose configuration
+        env:
+          MCD_TOKEN: unit-testing-secret-with-more-than-24-characters
+          MCD_HOST_DATA: /tmp/minecraft-deployer-test-data
+          MCD_PUBLIC_HOST: example.test
+        run: docker compose config -q
       - name: Compile Python sources
         run: python -m compileall -q app tests
       - name: Verify single-server switching
