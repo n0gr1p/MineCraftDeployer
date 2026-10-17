@@ -2,6 +2,8 @@
 import json
 import os
 import tempfile
+import io
+import zipfile
 
 import docker
 import pytest
@@ -220,3 +222,79 @@ def test_invalid_minecraft_player_names_are_rejected(environment):
             })
         assert resp.status_code==400
         assert "Minecraft Java usernames" in resp.json()["detail"]
+
+def server_pack_bytes():
+    config=(
+        "MINECRAFT_VERSION=1.20.1\\n"
+        "MODLOADER=Fabric\\n"
+        "MODLOADER_VERSION=0.19.3\\n"
+        "RECOMMENDED_JAVA_VERSION=17\\n"
+        "JAVA_ARGS=\\\"-Xmx8G -Xms8G\\\"\\n"
+    ).replace("\\n","\\n")
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,"w") as z:
+        z.writestr("variables.txt",config)
+        z.writestr("start.sh","echo NEVER RUN ME")
+        z.writestr("manifest.json",'{"name":"Prominence II"}')
+        z.writestr("mods/example.jar","fake mod")
+        z.writestr("config/example.toml","enabled=true")
+    return out.getvalue()
+
+
+def test_legacy_outer_server_pack_unwraps_at_activation(environment):
+    """The user's already uploaded ZIP should work without reuploading."""
+    sid=install_profile(portal.ROOT,4,valid=False)
+    data=portal.ROOT/sid/"minecraft"
+    with zipfile.ZipFile(data/"outer.zip","w") as outer:
+        outer.writestr("Prominence_II_v4_server_pack.zip",server_pack_bytes())
+        outer.writestr("readme.txt","Unzip and use the contained server pack")
+    # Simulate the old portal's behavior, where it unpacked only the wrapper.
+    portal.safe_extract(data/"outer.zip",data)
+    (data/"outer.zip").unlink()
+    portal.activate(sid)
+    meta=portal.meta_for(sid)
+    assert meta["mode"]=="fabric"
+    assert meta["java_version"]==17
+    assert meta["minecraft_version"]=="1.20.1"
+    assert meta["loader_version"]=="0.19.3"
+    assert (data/"mods"/"example.jar").exists()
+    assert (data/"config"/"example.toml").exists()
+    assert not (data/"Prominence_II_v4_server_pack.zip").exists()
+    created=environment.containers.creations[-1]
+    assert created["environment"]["TYPE"]=="FABRIC"
+    assert created["environment"]["VERSION"]=="1.20.1"
+    assert created["environment"]["FABRIC_LOADER_VERSION"]=="0.19.3"
+    assert created["environment"]["MEMORY"]=="6G"  # Ignore original pack's -Xmx8G.
+    assert environment.containers.items[sid].status=="running"
+    assert portal.active_id()==sid
+
+
+def test_new_outer_zip_upload_installs_fabric_profile(environment):
+    outer=io.BytesIO()
+    with zipfile.ZipFile(outer,"w") as z:
+        z.writestr("prominence-serverpack.zip",server_pack_bytes())
+        z.writestr("readme.txt","Outer package")
+    with TestClient(portal.app) as http:
+        resp=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Prominence II","ram_gb":"6","players":"TestPlayer"},
+            files={"pack":("wrapped.zip",outer.getvalue(),"application/zip")})
+        assert resp.status_code==200,resp.text
+        sid=resp.json()["id"]
+        assert portal.meta_for(sid)["mode"]=="fabric"
+        assert portal.meta_for(sid)["java_version"]==17
+        portal.activate(sid)
+        assert environment.containers.creations[-1]["environment"]["TYPE"]=="FABRIC"
+
+
+def test_client_export_zip_rejected_early(environment):
+    archive=io.BytesIO()
+    with zipfile.ZipFile(archive,"w") as z:
+        z.writestr("manifest.json",'{"minecraft":{"version":"1.20.1"}}')
+    with TestClient(portal.app) as http:
+        resp=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Client Export","ram_gb":"6","players":"TestPlayer"},
+            files={"pack":("client.zip",archive.getvalue(),"application/zip")})
+        assert resp.status_code==400
+        assert "client-export" in resp.json()["detail"]
