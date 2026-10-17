@@ -6,6 +6,7 @@ import tempfile
 import docker
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 os.environ.setdefault("MCD_TOKEN", "test-secret-" + "a" * 40)
 os.environ.setdefault("MCD_DATA", tempfile.mkdtemp(prefix="minecraft-deployer-test-"))
@@ -88,7 +89,7 @@ def install_profile(root, index, valid=True):
         (directory/"minecraft"/"server.jar").write_bytes(b"fake-jar")
     (directory/"meta.json").write_text(json.dumps({
         "id":sid,"name":f"Pack {index}","mode":"zip","cf_url":"",
-        "ram_gb":6,"port":25565+index  # Legacy value must be ignored.
+        "ram_gb":6,"whitelist":["TestPlayer"],"port":25565+index  # Legacy value must be ignored.
     }))
     return sid
 
@@ -183,3 +184,39 @@ def test_switch_stops_all_legacy_running_profiles(environment):
     assert environment.containers.items[b].status=="exited"
     assert environment.containers.items[c].status=="running"
     assert sum(item.status=="running" for item in environment.containers.items.values())==1
+
+
+def test_new_profile_player_whitelist_and_curseforge_without_key(environment,monkeypatch):
+    monkeypatch.setattr(portal,"CF_KEY","")
+    with TestClient(portal.app) as http:
+        resp=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={
+                "name":"Family Pack","ram_gb":"6",
+                "players":"Daughter_1, Friend2 Friend2",
+                "cf_url":"https://www.curseforge.com/minecraft/modpacks/test-pack/files/1234",
+            })
+        assert resp.status_code==200,resp.text
+        result=resp.json()
+        assert result["whitelist"]==["Daughter_1","Friend2"]
+        assert result["status"]=="not-created"
+        portal.activate(result["id"])
+        created=environment.containers.creations[-1]
+        assert created["environment"]["TYPE"]=="AUTO_CURSEFORGE"
+        assert "CF_API_KEY" not in created["environment"]
+        assert created["environment"]["WHITELIST"]=="Daughter_1,Friend2"
+        assert created["environment"]["ENABLE_WHITELIST"]=="TRUE"
+        assert "cap_drop" not in created
+
+
+def test_invalid_minecraft_player_names_are_rejected(environment):
+    with TestClient(portal.app) as http:
+        resp=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={
+                "name":"Bad Names","ram_gb":"6",
+                "players":"bad!name",
+                "cf_url":"https://www.curseforge.com/minecraft/modpacks/test-pack",
+            })
+        assert resp.status_code==400
+        assert "Minecraft Java usernames" in resp.json()["detail"]
