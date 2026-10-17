@@ -1,12 +1,191 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Minecraft Deployer</title><style>
-*{box-sizing:border-box}body{font:16px system-ui;background:#0b1520;color:#e5f6ef;max-width:1050px;margin:32px auto;padding:18px}h1{color:#8ce8a5}main{display:grid;grid-template-columns:360px 1fr;gap:18px}section{padding:22px;margin-bottom:18px;border-radius:16px;background:#182735;border:1px solid #2f5265}label{display:block;margin-top:15px;margin-bottom:6px}input{display:block;width:100%;padding:12px;color:white;background:#0d1926;border:1px solid #587181;border-radius:8px}button{padding:10px 15px;margin:9px 6px 0 0;border:0;border-radius:8px;background:#81dd9d;color:#14231c;font-weight:700;cursor:pointer}.server{border-top:1px solid #486071;padding:14px 0}small{color:#afc5d0}pre{overflow:auto;max-height:350px;white-space:pre-wrap;background:#0a1520;padding:15px}#status{color:#ffcf85;white-space:pre-wrap}@media(max-width:760px){main{display:block}}</style></head><body>
-<h1>⛏ Minecraft Deployer</h1><p>Self-service Minecraft Java servers</p>
-<section><label>Portal access token</label><input id="token" type="password" autocomplete="off" placeholder="Paste portal token"><button id="connect">Connect</button><p><small>Token is held in this tab only, not stored.</small></p></section>
-<main><section><h2>Create server</h2><form id="create"><label>Server name</label><input name="name" required maxlength="40" placeholder="Our Friends World"><label>RAM in GB</label><input name="ram_gb" type="number" min="2" max="12" value="6"><label>CurseForge modpack URL</label><input name="cf_url" placeholder="https://www.curseforge.com/minecraft/modpacks/..."><label>OR ready-to-run server ZIP</label><input name="pack" type="file" accept=".zip"><label>Optional world save ZIP</label><input name="world" type="file" accept=".zip"><p><small>ZIP mode currently requires top-level server.jar. World ZIP must contain exactly one level.dat. Whitelist is enabled; admin must configure players separately.</small></p><button>Create server</button></form><p id="status"></p></section>
-<section><h2>Servers</h2><button id="refresh">Refresh</button><div id="servers"></div><h3>Logs</h3><pre id="logs">Select a server's Logs button.</pre></section></main>
-<script>
-let token='';const byId=id=>document.getElementById(id);
-async function request(path,options={}){const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});const body=await response.json();if(!response.ok)throw Error(body.detail||response.status);return body}
-async function refresh(){try{const list=await request('/servers');byId('status').textContent='';const area=byId('servers');area.replaceChildren();for(const s of list){const box=document.createElement('div');box.className='server';const title=document.createElement('h3');title.textContent=s.name;const sub=document.createElement('p');sub.textContent=s.status+' · '+s.address+' · '+s.ram_gb+' GB';box.append(title,sub);for(const cmd of ['start','stop','restart','logs']){const btn=document.createElement('button');btn.textContent=cmd;btn.onclick=async()=>{try{if(cmd==='logs')byId('logs').textContent=(await request('/servers/'+s.id+'/logs')).logs;else{await request('/servers/'+s.id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:cmd})});await refresh()}}catch(e){byId('status').textContent=e.message}};box.append(btn)}area.append(box)}}catch(e){byId('status').textContent=e.message}}
-byId('connect').onclick=()=>{token=byId('token').value;refresh()};byId('refresh').onclick=refresh;byId('create').onsubmit=async event=>{event.preventDefault();byId('status').textContent='Uploading…';try{const form=new FormData(event.target);for(const key of ['pack','world'])if(!form.get(key)?.size)form.delete(key);await request('/servers',{method:'POST',body:form});event.target.reset();await refresh()}catch(e){byId('status').textContent=e.message}};
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MineCraftDeployer · Family Server Portal</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0c1420;color:#e8f3ef}
+    *{box-sizing:border-box}
+    body{max-width:1120px;margin:0 auto;padding:30px 20px}
+    h1{margin:0;color:#9beab0;font-size:2rem}
+    h2{margin:0 0 12px;font-size:1.25rem}
+    p{line-height:1.5}
+    .muted,small{color:#b4c9c9}
+    .layout{display:grid;grid-template-columns:minmax(270px,360px) 1fr;gap:18px}
+    .panel{padding:22px;border-radius:16px;background:#192733;border:1px solid #36505f;margin-top:18px}
+    .highlight{background:#1b332f;border-color:#3e8b68}
+    label{display:block;margin-top:16px;margin-bottom:6px;font-weight:600}
+    input,select{display:block;width:100%;padding:11px 12px;color:white;background:#0d1b28;border:1px solid #5a7380;border-radius:8px;font:inherit}
+    input[type=file]{font-size:13px}
+    button{padding:10px 14px;margin:8px 8px 0 0;border:1px solid transparent;border-radius:9px;background:#8ae5a8;color:#0a1d14;font-weight:700;cursor:pointer;font:inherit}
+    button:hover:not(:disabled){filter:brightness(1.1)}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    button.secondary{background:#203641;color:#e9f9f2;border-color:#4c6b74}
+    button.danger{background:#ffdbb0;color:#372016}
+    .status{min-height:1.2em;color:#ffd991;white-space:pre-wrap}
+    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .row>*{flex:none}
+    .row select{flex:1;min-width:185px}
+    .server{border-top:1px solid #46606a;padding:15px 0}
+    .server:first-child{border-top:0}
+    .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .tag{font-size:.75rem;padding:4px 9px;border-radius:20px;color:#a3ecc0;background:#264c3d;border:1px solid #4b8868}
+    .tag.off{color:#d7e0e0;background:#263a42;border-color:#52666b}
+    pre{overflow:auto;max-height:320px;white-space:pre-wrap;background:#0a1723;padding:16px;border-radius:9px}
+    .help{font-size:.84rem}
+    #session{max-width:480px}
+    @media(max-width:790px){.layout{display:block}body{padding:18px 12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⛏ MineCraftDeployer</h1>
+    <p class="muted">Install as many packs as you like. Play on one server at a time — always the same join address.</p>
+  </header>
+  <section id="session" class="panel">
+    <label for="token">Portal access token</label>
+    <div class="row">
+      <input id="token" type="password" autocomplete="off" placeholder="Paste the family portal token">
+      <button id="connect">Connect</button>
+    </div>
+    <p class="help muted">Kept in this browser tab only.</p>
+  </section>
+  <section class="panel highlight">
+    <h2>Active Minecraft server</h2>
+    <p id="activeSummary">Connect to view your servers.</p>
+    <p id="joinAddress" class="muted"></p>
+    <div class="row">
+      <select id="serverSelect" aria-label="Select an installed Minecraft server"></select>
+      <button id="activate" disabled>Make Active</button>
+    </div>
+    <p class="help muted">Switching saves/stops the old game before starting the new one. Worlds and modpacks stay installed. Friends keep using the same game address and port.</p>
+    <div id="activeControls" class="row" hidden>
+      <button id="start" class="secondary">Start</button>
+      <button id="stop" class="danger">Stop</button>
+      <button id="restart" class="secondary">Restart</button>
+    </div>
+  </section>
+  <main class="layout">
+    <section class="panel">
+      <h2>Install a new server</h2>
+      <form id="create">
+        <label for="name">Server name</label>
+        <input id="name" name="name" required maxlength="40" placeholder="Our Friends World">
+        <label for="ram">RAM (GB)</label>
+        <input id="ram" name="ram_gb" type="number" min="2" max="12" value="6">
+        <label for="cfUrl">CurseForge modpack URL</label>
+        <input id="cfUrl" name="cf_url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
+        <label for="pack">OR ready-to-run server ZIP</label>
+        <input id="pack" name="pack" type="file" accept=".zip">
+        <label for="world">Optional saved world ZIP</label>
+        <input id="world" name="world" type="file" accept=".zip">
+        <p class="muted help">ZIP packs currently need a top-level server.jar. World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play.</p>
+        <button type="submit">Install Server</button>
+      </form>
+    </section>
+    <section class="panel">
+      <div class="row"><h2>Installed servers</h2><button id="refresh" class="secondary">Refresh</button></div>
+      <div id="servers"></div>
+      <h2>Server logs</h2>
+      <pre id="logs">Choose Logs on an installed server.</pre>
+    </section>
+  </main>
+  <p id="status" class="status" role="status"></p>
+  <script>
+    let token='', servers=[], busy=false;
+    const $=id=>document.getElementById(id);
+    async function request(path,options={}){
+      const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
+      const body=await response.json();
+      if(!response.ok)throw Error(typeof body.detail==='string'?body.detail:JSON.stringify(body.detail||response.status));
+      return body;
+    }
+    function active(){return servers.find(s=>s.is_active)}
+    function message(text){$('status').textContent=text}
+    function setBusy(value){
+      busy=value;
+      for(const id of ['activate','start','stop','restart','refresh'])
+        $(id).disabled=value;
+      for(const btn of document.querySelectorAll('.logsButton'))
+        btn.disabled=value;
+    }
+    async function doAction(id,cmd){
+      if(busy||!id)return;
+      setBusy(true);
+      message(cmd==='activate'?'Switching servers (waiting for world to save and stop)…':cmd+'…');
+      try{
+        await request('/servers/'+id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:cmd})});
+        message(cmd==='activate'?'Server selected. Minecraft may still be starting; check logs.':'Done.');
+        await refresh(true);
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function paint(){
+      const selectedBefore=$('serverSelect').value;
+      const current=active();
+      const selector=$('serverSelect');selector.replaceChildren();
+      for(const s of servers){
+        const opt=document.createElement('option');
+        opt.value=s.id;opt.textContent=s.name+' ('+s.status+')';
+        selector.append(opt);
+      }
+      const preferred=servers.some(s=>s.id===selectedBefore)?selectedBefore:(current?.id||servers[0]?.id);
+      if(preferred)selector.value=preferred;
+      $('activeSummary').textContent=current
+        ? current.name+' — '+(current.status==='running'?'running':current.status==='not-created'?'not started':current.status)
+        : 'No active server selected.';
+      $('joinAddress').textContent=servers.length?'Friends join: '+servers[0].address:'Install a server to begin.';
+      $('activate').disabled=busy||!servers.length||selector.value===current?.id;
+      $('activeControls').hidden=!current;
+      $('start').disabled=busy||!current||current.status==='running';
+      $('stop').disabled=busy||!current||current.status!=='running';
+      $('restart').disabled=busy||!current||current.status!=='running';
+      const area=$('servers');area.replaceChildren();
+      if(!servers.length){area.textContent='No server profiles installed yet.';return}
+      for(const s of servers){
+        const box=document.createElement('div');box.className='server';
+        const title=document.createElement('div');title.className='server-name';
+        const heading=document.createElement('strong');heading.textContent=s.name;
+        const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
+        title.append(heading,badge);
+        const details=document.createElement('p');details.className='muted help';
+        details.textContent=s.ram_gb+' GB RAM · '+s.status;
+        const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
+        logs.disabled=busy;
+        logs.onclick=async()=>{
+          try{message('');$('logs').textContent=(await request('/servers/'+s.id+'/logs')).logs}
+          catch(error){message(error.message)}
+        };
+        box.append(title,details,logs);area.append(box);
+      }
+    }
+    async function refresh(quiet=false){
+      try{servers=await request('/servers');if(!quiet)message('');paint()}
+      catch(error){message(error.message)}
+    }
+    $('connect').onclick=()=>{token=$('token').value;refresh()};
+    $('refresh').onclick=()=>refresh();
+    $('serverSelect').onchange=()=>paint();
+    $('activate').onclick=()=>{
+      const target=servers.find(s=>s.id===$('serverSelect').value),old=active();
+      if(!target||target.id===old?.id)return;
+      if(old?.status==='running'&&!confirm('Stop "'+old.name+'" and start "'+target.name+'" on the same game port?'))return;
+      doAction(target.id,'activate');
+    };
+    $('start').onclick=()=>{const s=active();if(s)doAction(s.id,'start')};
+    $('stop').onclick=()=>{const s=active();if(s&&confirm('Stop "'+s.name+'"?'))doAction(s.id,'stop')};
+    $('restart').onclick=()=>{const s=active();if(s&&confirm('Restart "'+s.name+'"?'))doAction(s.id,'restart')};
+    $('create').onsubmit=async event=>{
+      event.preventDefault();
+      if(busy)return;
+      const form=new FormData(event.target);
+      for(const key of ['pack','world'])if(!form.get(key)?.size)form.delete(key);
+      setBusy(true);message('Uploading and installing server profile…');
+      try{await request('/servers',{method:'POST',body:form});event.target.reset();await refresh(true);message('Server installed. Select it above and click Make Active.')}
+      catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    };
+  </script>
+</body>
+</html>
