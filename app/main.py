@@ -72,8 +72,6 @@ def running(c):
 def check_launch(meta):
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"This ZIP does not contain a top-level server.jar; it cannot be activated yet")
-    if meta["mode"]=="curseforge" and not CF_KEY:
-        raise HTTPException(409,"CF_API_KEY is required for CurseForge packs")
 
 def get_or_create_container(meta):
     sid=meta["id"]
@@ -95,9 +93,20 @@ def get_or_create_container(meta):
     if c:
         return c
     env={"EULA":"TRUE","MEMORY":f'{meta["ram_gb"]}G',"ONLINE_MODE":"TRUE",
-         "ENABLE_WHITELIST":"TRUE","ENABLE_RCON":"FALSE"}
+         "ENABLE_RCON":"FALSE"}
+    allowed=meta.get("whitelist",[])
+    if allowed:
+        # A public game port must only admit the names entered at installation.
+        env.update({"ENABLE_WHITELIST":"TRUE","ENFORCE_WHITELIST":"TRUE",
+                    "WHITELIST":",".join(allowed),
+                    "EXISTING_WHITELIST_FILE":"MERGE"})
+    else:
+        # Backward compatibility for profiles created before player entry existed.
+        # Unrestricted game joining is clearly indicated in the dashboard.
+        env["ENABLE_WHITELIST"]="FALSE"
     if meta["mode"]=="curseforge":
-        env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"],"CF_API_KEY":CF_KEY})
+        env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"]})
+        if CF_KEY: env["CF_API_KEY"]=CF_KEY
     else:
         env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
     return client.containers.create(
@@ -105,7 +114,7 @@ def get_or_create_container(meta):
         volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},
         ports={"25565/tcp":GAME_PORT},mem_limit=f'{meta["ram_gb"]+1}g',
         nano_cpus=400000000,restart_policy={"Name":"no"},
-        security_opt=["no-new-privileges:true"],cap_drop=["ALL"])
+        security_opt=["no-new-privileges:true"])
 
 def activate(sid):
     # The lock covers the entire stop -> start transition, including rollback.
@@ -214,7 +223,9 @@ def state(meta):
     if c: c.reload()
     return {"id":meta["id"],"name":meta["name"],"port":GAME_PORT,
             "ram_gb":meta["ram_gb"],"status":c.status if c else "not-created",
-            "is_active":active_id()==meta["id"],"address":f"{HOST}:{GAME_PORT}"}
+            "is_active":active_id()==meta["id"],
+            "whitelist":meta.get("whitelist",[]),
+            "address":f"{HOST}:{GAME_PORT}"}
 
 @app.get("/")
 def home(): return FileResponse(Path(__file__).parent/"static"/"index.html")
@@ -225,16 +236,19 @@ def list_servers(authorization:str|None=Header(None)):
     return [state(json.loads((p/"meta.json").read_text())) for p in ROOT.iterdir() if (p/"meta.json").is_file()]
 
 @app.post("/api/servers")
-async def create_server(name:str=Form(...),ram_gb:int=Form(6),cf_url:str=Form(""),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
+async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(...),cf_url:str=Form(""),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
     auth(authorization)
     if not re.fullmatch("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}",name): raise HTTPException(400,"Invalid server name")
     if not 2<=ram_gb<=MAX_RAM: raise HTTPException(400,"Invalid RAM allocation")
     if bool(cf_url)==bool(pack): raise HTTPException(400,"Supply exactly one CurseForge URL or server ZIP")
+    whitelist=[p.strip() for p in re.split(r"[,\s]+",players) if p.strip()]
+    if not whitelist or len(whitelist)>50 or any(not re.fullmatch(r"[A-Za-z0-9_]{3,16}",p) for p in whitelist):
+        raise HTTPException(400,"Enter 1-50 valid Minecraft Java usernames (3-16 letters, numbers, underscores)")
+    whitelist=list(dict.fromkeys(whitelist))
     if cf_url:
         url=urlparse(cf_url)
         if url.scheme!="https" or url.hostname not in ("curseforge.com","www.curseforge.com") or not url.path.startswith("/minecraft/modpacks/"):
             raise HTTPException(400,"Invalid CurseForge URL")
-        if not CF_KEY: raise HTTPException(400,"Configure CF_API_KEY first")
     sid=uuid.uuid4().hex
     root=ROOT/sid
     root.mkdir(mode=0o700)
@@ -256,7 +270,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),cf_url:str=Form(""
             if len(candidates)!=1: raise ValueError("World ZIP must contain exactly one level.dat")
             shutil.copytree(candidates[0].parent,data/"world",dirs_exist_ok=True)
             shutil.rmtree(root/"import")
-        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip"}
+        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist}
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
