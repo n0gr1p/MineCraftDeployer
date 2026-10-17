@@ -1,13 +1,14 @@
 """No Docker daemon required; verify the one-active-container invariant."""
 import json
 import os
-from pathlib import Path
+import tempfile
 
 import docker
 import pytest
 from fastapi import HTTPException
 
 os.environ.setdefault("MCD_TOKEN", "test-secret-" + "a" * 40)
+os.environ.setdefault("MCD_DATA", tempfile.mkdtemp(prefix="minecraft-deployer-test-"))
 
 from app import main as portal
 
