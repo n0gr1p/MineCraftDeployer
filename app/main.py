@@ -1,4 +1,5 @@
-import json, os, re, secrets, shutil, uuid, zipfile
+import fcntl, json, os, re, secrets, shutil, uuid, zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 import docker
@@ -14,6 +15,8 @@ if len(TOKEN)<24: raise RuntimeError("MCD_TOKEN must be at least 24 characters")
 CF_KEY=os.getenv("CF_API_KEY","")
 MAX_RAM=int(os.getenv("MCD_MAX_RAM_GB","12"))
 HOST=os.getenv("MCD_PUBLIC_HOST","localhost")
+GAME_PORT=int(os.getenv("MCD_GAME_PORT","25565"))
+if not 1<=GAME_PORT<=65535: raise RuntimeError("Invalid MCD_GAME_PORT")
 client=docker.from_env()
 app=FastAPI(title="MineCraftDeployer")
 app.mount("/static",StaticFiles(directory=Path(__file__).parent/"static"),name="static")
@@ -33,6 +36,147 @@ def meta_for(sid): return json.loads((path_for(sid)/"meta.json").read_text())
 def container_for(sid):
     try: return client.containers.get("mcd-"+sid)
     except docker.errors.NotFound: return None
+
+def active_id():
+    try:
+        return json.loads((ROOT/"active.json").read_text()).get("server_id")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def set_active(sid):
+    temp=ROOT/(".active-"+uuid.uuid4().hex+".tmp")
+    temp.write_text(json.dumps({"server_id":sid}))
+    temp.replace(ROOT/"active.json")
+
+@contextmanager
+def deployment_lock():
+    # Across processes/workers on this Linux host, not just Python threads.
+    with (ROOT/".deployment.lock").open("a+") as handle:
+        fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+
+def all_managed():
+    for directory in ROOT.iterdir():
+        if re.fullmatch("[0-9a-f]{32}",directory.name) and (directory/"meta.json").is_file():
+            c=container_for(directory.name)
+            if c:
+                c.reload()
+                yield directory.name,c
+
+def running(c):
+    return c.status in ("running","restarting","paused")
+
+def check_launch(meta):
+    if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
+        raise HTTPException(409,"This ZIP does not contain a top-level server.jar; it cannot be activated yet")
+    if meta["mode"]=="curseforge" and not CF_KEY:
+        raise HTTPException(409,"CF_API_KEY is required for CurseForge packs")
+
+def get_or_create_container(meta):
+    sid=meta["id"]
+    c=container_for(sid)
+    if c:
+        c.reload()
+        existing=(c.attrs.get("HostConfig",{}).get("PortBindings",{}).get("25565/tcp") or [])
+        ports={str(binding.get("HostPort")) for binding in existing}
+        if ports!={str(GAME_PORT)}:
+            # A container created by the old multiport preview must be replaced.
+            # Its /data volume is a bind mount and is never removed.
+            c.update(restart_policy={"Name":"no"})
+            if running(c):
+                c.stop(timeout=45)
+                c.reload()
+                if running(c): raise RuntimeError("Old container did not stop")
+            c.remove()
+            c=None
+    if c:
+        return c
+    env={"EULA":"TRUE","MEMORY":f'{meta["ram_gb"]}G',"ONLINE_MODE":"TRUE",
+         "ENABLE_WHITELIST":"TRUE","ENABLE_RCON":"FALSE"}
+    if meta["mode"]=="curseforge":
+        env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"],"CF_API_KEY":CF_KEY})
+    else:
+        env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
+    return client.containers.create(
+        "itzg/minecraft-server:java21",name="mcd-"+sid,environment=env,
+        volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},
+        ports={"25565/tcp":GAME_PORT},mem_limit=f'{meta["ram_gb"]+1}g',
+        nano_cpus=400000000,restart_policy={"Name":"no"},
+        security_opt=["no-new-privileges:true"],cap_drop=["ALL"])
+
+def activate(sid):
+    # The lock covers the entire stop -> start transition, including rollback.
+    with deployment_lock():
+        meta=meta_for(sid)
+        check_launch(meta)  # Reject invalid packs BEFORE stopping an active game.
+        old_running=[(other_id,c) for other_id,c in all_managed()
+                     if other_id!=sid and c.status=="running"]
+        try:
+            for other_id,c in all_managed():
+                if other_id==sid: continue
+                # Prevent Docker restarting an inactive profile on a future reboot.
+                c.update(restart_policy={"Name":"no"})
+                if running(c):
+                    c.stop(timeout=45)
+                    c.reload()
+                    if running(c): raise RuntimeError(f"Could not stop {other_id}")
+            c=get_or_create_container(meta)
+            c.reload()
+            if c.status!="running": c.start()
+            c.update(restart_policy={"Name":"unless-stopped"})
+            set_active(sid)
+            return state(meta)
+        except (docker.errors.DockerException,RuntimeError,OSError) as exc:
+            # Best effort: restore the previous live server if switching failed.
+            restore_error=None
+            if len(old_running)==1:
+                prior_id,prior=old_running[0]
+                try:
+                    current=container_for(sid)
+                    if current:
+                        current.reload()
+                        if running(current):
+                            current.update(restart_policy={"Name":"no"})
+                            current.stop(timeout=45)
+                    prior.reload()
+                    if prior.status!="running": prior.start()
+                    prior.update(restart_policy={"Name":"unless-stopped"})
+                    set_active(prior_id)
+                except (docker.errors.DockerException,RuntimeError,OSError) as rollback:
+                    restore_error=str(rollback)
+            detail=f"Could not activate server: {exc}"
+            if restore_error: detail+=f"; previous server restore also failed: {restore_error}"
+            raise HTTPException(409,detail) from exc
+
+def stop_active(sid):
+    with deployment_lock():
+        if active_id()!=sid:
+            raise HTTPException(409,"Only the selected server can be stopped")
+        c=container_for(sid)
+        if c:
+            try:
+                c.update(restart_policy={"Name":"no"})
+                c.reload()
+                if running(c): c.stop(timeout=45)
+            except docker.errors.DockerException as exc:
+                raise HTTPException(409,f"Could not stop server: {exc}") from exc
+        return state(meta_for(sid))
+
+def restart_active(sid):
+    with deployment_lock():
+        if active_id()!=sid:
+            raise HTTPException(409,"Only the selected server can be restarted")
+        meta=meta_for(sid)
+        c=container_for(sid)
+        if not c: raise HTTPException(409,"Server has not been started yet")
+        try:
+            c.restart(timeout=45)
+            return state(meta)
+        except docker.errors.DockerException as exc:
+            raise HTTPException(409,f"Could not restart server: {exc}") from exc
 
 def safe_extract(source,target):
     with zipfile.ZipFile(source) as archive:
@@ -67,7 +211,10 @@ async def save_upload(upload,target):
 
 def state(meta):
     c=container_for(meta["id"])
-    return {"id":meta["id"],"name":meta["name"],"port":meta["port"],"ram_gb":meta["ram_gb"],"status":c.status if c else "not-created","address":f'{HOST}:{meta["port"]}'}
+    if c: c.reload()
+    return {"id":meta["id"],"name":meta["name"],"port":GAME_PORT,
+            "ram_gb":meta["ram_gb"],"status":c.status if c else "not-created",
+            "is_active":active_id()==meta["id"],"address":f"{HOST}:{GAME_PORT}"}
 
 @app.get("/")
 def home(): return FileResponse(Path(__file__).parent/"static"/"index.html")
@@ -88,9 +235,6 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),cf_url:str=Form(""
         if url.scheme!="https" or url.hostname not in ("curseforge.com","www.curseforge.com") or not url.path.startswith("/minecraft/modpacks/"):
             raise HTTPException(400,"Invalid CurseForge URL")
         if not CF_KEY: raise HTTPException(400,"Configure CF_API_KEY first")
-    used={json.loads((p/"meta.json").read_text())["port"] for p in ROOT.iterdir() if (p/"meta.json").exists()}
-    port=next((n for n in range(25565,25601) if n not in used),None)
-    if port is None: raise HTTPException(409,"No available configured port")
     sid=uuid.uuid4().hex
     root=ROOT/sid
     root.mkdir(mode=0o700)
@@ -112,37 +256,31 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),cf_url:str=Form(""
             if len(candidates)!=1: raise ValueError("World ZIP must contain exactly one level.dat")
             shutil.copytree(candidates[0].parent,data/"world",dirs_exist_ok=True)
             shutil.rmtree(root/"import")
-        meta={"id":sid,"name":name,"port":port,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip"}
+        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip"}
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
 
-class Command(BaseModel): action:str
+class Command(BaseModel):
+    action:str
 
 @app.post("/api/servers/{sid}/action")
 def action(sid:str,command:Command,authorization:str|None=Header(None)):
     auth(authorization)
-    meta=meta_for(sid)
-    c=container_for(sid)
+    meta_for(sid)
+    if command.action=="activate":
+        return activate(sid)
+    if command.action=="start":
+        if active_id()!=sid:
+            raise HTTPException(409,"Choose Make Active to switch servers")
+        return activate(sid)
     if command.action=="stop":
-        if c: c.stop(timeout=45)
-    elif command.action=="restart":
-        if not c: raise HTTPException(409,"Server not created")
-        c.restart(timeout=45)
-    elif command.action=="start":
-        if c:
-            if c.status!="running": c.start()
-        else:
-            env={"EULA":"TRUE","MEMORY":f'{meta["ram_gb"]}G',"ONLINE_MODE":"TRUE","ENABLE_WHITELIST":"TRUE","ENABLE_RCON":"FALSE"}
-            if meta["mode"]=="curseforge": env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"],"CF_API_KEY":CF_KEY})
-            else:
-                if not (path_for(sid)/"minecraft"/"server.jar").exists(): raise HTTPException(409,"Server ZIP must contain a top-level server.jar")
-                env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
-            client.containers.run("itzg/minecraft-server:java21",detach=True,name="mcd-"+sid,environment=env,volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},ports={"25565/tcp":meta["port"]},mem_limit=f'{meta["ram_gb"]+1}g',nano_cpus=400000000,restart_policy={"Name":"unless-stopped"},security_opt=["no-new-privileges:true"],cap_drop=["ALL"])
-    else: raise HTTPException(400,"Unknown action")
-    return state(meta)
+        return stop_active(sid)
+    if command.action=="restart":
+        return restart_active(sid)
+    raise HTTPException(400,"Unknown action")
 
 @app.get("/api/servers/{sid}/logs")
 def logs(sid:str,authorization:str|None=Header(None)):
