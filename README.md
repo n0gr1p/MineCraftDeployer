@@ -14,7 +14,7 @@ The administrative website remains **LAN-only**. Your daughter installs packs, c
 
 Each server profile has its own saved files, mods, config and world. Choosing **Make Active** on another installed profile: 1) gracefully stops any other managed running server, 2) disables Docker restart policies on inactive profiles, 3) starts the selected profile using the same game port, and 4) records that selection on disk. Stopping the selected server keeps it selected but offline. Start/restart actions operate only on the selected profile.
 
-The switch operation uses a Linux filesystem lock so overlapping portal requests cannot both activate different servers. If activation fails, the worker attempts to restore the previously running profile and reports a failure. The new game may still require startup time after Docker reports it as running. Existing preview containers with a different published port are recreated using the new port when selected; their bind-mounted game files remain intact.
+The switch operation uses a Linux filesystem lock so overlapping portal requests cannot both activate different servers. If activation fails, the worker attempts to restore the previously running profile and reports a failure. The new game may still require startup time after Docker reports it as running. Existing preview containers with a different published port are recreated using the new port when selected; their bind-mounted game files remain intact. Containers created by the first Fabric preview with `no-new-privileges` are also recreated automatically on the next **Make Active** or **Start** action: that Docker option prevented the official image's startup script from executing on the Snap Docker host. Replacement preserves the bind-mounted game folder but discards the old (failed) container's own filesystem and logs.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ Server-pack ZIPs are recognized if they contain a top-level `server.jar` **or** 
 
 ## Security tradeoffs for a private network
 
-The portal stays on a trusted LAN, and **TCP 8080 is never port-forwarded**. The backend presently mounts the Docker socket, granting effectively root-equivalent control of the host. Do not give the administrative token to untrusted users. Modpacks execute Java code in containers, so only install trusted content. The token travels over unencrypted LAN HTTP unless local HTTPS is configured.
+The portal stays on a trusted LAN, and **TCP 8080 is never port-forwarded**. The Minecraft runtime containers intentionally do not set `no-new-privileges` after a verified startup failure with the official image on Snap Docker; this removes a defense-in-depth restriction, so only deploy trusted modpacks and keep the portal and Docker daemon protected. The backend presently mounts the Docker socket, granting effectively root-equivalent control of the host. Do not give the administrative token to untrusted users. Modpacks execute Java code in containers, so only install trusted content. The token travels over unencrypted LAN HTTP unless local HTTPS is configured.
 
 Future improvements: real modpack installer detection, version-aware Java selection, world backups, UUID migration, whitelist management and resource quotas. A restricted deployment worker is desirable even on a LAN but is not a prerequisite for evaluating this private-network prototype.
 
