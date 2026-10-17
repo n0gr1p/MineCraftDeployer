@@ -36,7 +36,8 @@ class FakeContainer:
         self.policy=restart_policy["Name"]
 
     def start(self):
-        if self.fail_start:
+        if self.fail_start or self.sid in self.owner.fail_once_for:
+            self.owner.fail_once_for.discard(self.sid)
             raise docker.errors.APIError("deliberate start failure")
         # No two Minecraft processes should ever overlap in fake runtime.
         assert not any(c.status=="running" for sid,c in self.owner.items.items() if sid!=self.sid)
@@ -70,6 +71,7 @@ class FakeContainers:
     def __init__(self):
         self.items={}
         self.fail_for=set()
+        self.fail_once_for=set()
         self.creations=[]
 
     def get(self, name):
@@ -83,6 +85,7 @@ class FakeContainers:
         port=kwargs["ports"]["25565/tcp"]
         c=FakeContainer(self,sid,port,fail_start=sid in self.fail_for)
         c.attrs["Config"]["Env"]=[key+"="+str(val) for key,val in kwargs["environment"].items()]
+        c.attrs["HostConfig"]["Memory"]=int(kwargs["mem_limit"][:-1])*1024**3
         self.items[sid]=c
         self.creations.append(kwargs)
         return c
@@ -441,3 +444,113 @@ def test_players_endpoint_requires_auth_and_validated_actions(environment):
                         json={"action":"op","username":"TestPlayer"})
         assert valid.status_code==200
         assert valid.json()["ops"]==["TestPlayer"]
+
+
+def test_ram_change_offline_pending_until_next_activation(environment):
+    sid=install_profile(portal.ROOT,31)
+    portal.activate(sid)
+    first=environment.containers.items[sid]
+    portal.stop_active(sid)
+
+    updated=portal.update_ram(sid,portal.RamChange(ram_gb=8),
+                              authorization="Bearer "+portal.TOKEN)
+    assert updated["ram_gb"]==8
+    assert updated["max_ram_gb"]==portal.MAX_RAM
+    assert updated["ram_change_pending"] is True
+    assert first is environment.containers.items[sid]
+    assert first.status=="exited"
+    assert portal.meta_for(sid)["ram_gb"]==8
+
+    portal.activate(sid)
+    assert first not in environment.containers.items.values()
+    new=environment.containers.items[sid]
+    assert "MEMORY=8G" in new.attrs["Config"]["Env"]
+    assert new.attrs["HostConfig"]["Memory"]==9*1024**3
+    assert portal.state(portal.meta_for(sid))["ram_change_pending"] is False
+    assert (portal.ROOT/sid/"minecraft"/"server.jar").exists()
+
+
+def test_ram_change_unstarted_inactive_profile_is_profile_only(environment):
+    sid=install_profile(portal.ROOT,32)
+    result=portal.update_ram(sid,portal.RamChange(ram_gb=9),
+                             authorization="Bearer "+portal.TOKEN)
+    assert result["ram_gb"]==9
+    assert result["status"]=="not-created"
+    assert result["ram_change_pending"] is False
+    assert len(environment.containers.creations)==0
+    portal.activate(sid)
+    assert environment.containers.items[sid].status=="running"
+    assert "MEMORY=9G" in environment.containers.items[sid].attrs["Config"]["Env"]
+
+
+def test_ram_change_live_requires_confirmation_and_recreates_only_game(environment):
+    active=install_profile(portal.ROOT,33)
+    other=install_profile(portal.ROOT,34)
+    portal.activate(active)
+    before=environment.containers.items[active]
+
+    with pytest.raises(HTTPException) as exc:
+        portal.update_ram(active,portal.RamChange(ram_gb=8),
+                          authorization="Bearer "+portal.TOKEN)
+    assert exc.value.status_code==409
+    assert "Confirm the restart" in exc.value.detail
+    assert portal.meta_for(active)["ram_gb"]==6
+    assert before.status=="running"
+    assert len(environment.containers.creations)==1
+
+    result=portal.update_ram(active,portal.RamChange(ram_gb=8,restart_running=True),
+                             authorization="Bearer "+portal.TOKEN)
+    assert result["ram_gb"]==8 and result["status"]=="running"
+    assert result["is_active"] is True
+    assert before not in environment.containers.items.values()
+    assert environment.containers.items[active].policy=="unless-stopped"
+    assert environment.containers.items[active].attrs["HostConfig"]["Memory"]==9*1024**3
+    assert (portal.ROOT/other/"minecraft"/"server.jar").exists()
+    assert portal.active_id()==active
+    assert len(environment.containers.items)==1
+
+
+def test_ram_change_rolls_back_after_failed_new_container_start(environment):
+    sid=install_profile(portal.ROOT,35)
+    portal.activate(sid)
+    environment.containers.fail_once_for.add(sid)
+    with pytest.raises(HTTPException) as exc:
+        portal.update_ram(sid,portal.RamChange(ram_gb=10,restart_running=True),
+                          authorization="Bearer "+portal.TOKEN)
+    assert exc.value.status_code==409
+    assert "previous 6 GB allocation restored" in exc.value.detail
+    assert portal.meta_for(sid)["ram_gb"]==6
+    restored=environment.containers.items[sid]
+    assert restored.status=="running"
+    assert "MEMORY=6G" in restored.attrs["Config"]["Env"]
+    assert restored.attrs["HostConfig"]["Memory"]==7*1024**3
+
+
+def test_ram_change_endpoint_requires_auth_and_valid_range(environment,monkeypatch):
+    sid=install_profile(portal.ROOT,36)
+    with TestClient(portal.app) as http:
+        path="/api/servers/"+sid+"/ram"
+        assert http.patch(path,json={"ram_gb":8}).status_code==401
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        assert http.patch(path,headers=auth,json={"ram_gb":1}).status_code==422
+        assert http.patch(path,headers=auth,json={"ram_gb":portal.MAX_RAM+1}).status_code==400
+        assert http.patch(path,headers=auth,json={"ram_gb":"not-a-number"}).status_code==422
+        assert portal.meta_for(sid)["ram_gb"]==6
+        ok=http.patch(path,headers=auth,json={"ram_gb":8})
+        assert ok.status_code==200
+        assert ok.json()["ram_gb"]==8
+
+
+def test_ram_change_rejects_unexpected_running_inactive_profile(environment):
+    selected=install_profile(portal.ROOT,37)
+    other=install_profile(portal.ROOT,38)
+    portal.activate(selected)
+    # Simulate a legacy background Minecraft process that should not be modified.
+    stray=FakeContainer(environment.containers,other,25565,status="running")
+    environment.containers.items[other]=stray
+    with pytest.raises(HTTPException) as exc:
+        portal.update_ram(other,portal.RamChange(ram_gb=8,restart_running=True),
+                          authorization="Bearer "+portal.TOKEN)
+    assert exc.value.status_code==409
+    assert portal.meta_for(other)["ram_gb"]==6
+    assert stray.status=="running"
