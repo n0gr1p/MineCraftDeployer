@@ -175,6 +175,36 @@ def test_old_multiport_container_recreated_only_when_activated(environment):
     assert (portal.ROOT/a/"minecraft"/"server.jar").exists()
 
 
+def test_old_no_new_privileges_container_recreated_and_data_preserved(environment):
+    sid=install_profile(portal.ROOT,5)
+    old=FakeContainer(environment.containers,sid,25565,status="exited")
+    old.attrs["HostConfig"]["SecurityOpt"]=["no-new-privileges:true"]
+    environment.containers.items[sid]=old
+    (portal.ROOT/sid/"minecraft"/"world").mkdir()
+    (portal.ROOT/sid/"minecraft"/"world"/"level.dat").write_bytes(b"world-data")
+
+    portal.set_active(sid)  # Already selected in the UI, but the container exited.
+    result=portal.action(sid,portal.Command(action="start"),
+                         authorization="Bearer "+portal.TOKEN)
+
+    assert old not in environment.containers.items.values()
+    assert result["is_active"] and result["status"]=="running"
+    assert old.policy=="no"
+    assert (portal.ROOT/sid/"minecraft"/"server.jar").exists()
+    assert (portal.ROOT/sid/"minecraft"/"world"/"level.dat").read_bytes()==b"world-data"
+    assert "security_opt" not in environment.containers.creations[-1]
+
+
+def test_no_new_privileges_variation_is_replaced(environment):
+    sid=install_profile(portal.ROOT,6)
+    old=FakeContainer(environment.containers,sid,25565,status="created")
+    old.attrs["HostConfig"]["SecurityOpt"]=["no-new-privileges"]
+    environment.containers.items[sid]=old
+    portal.activate(sid)
+    assert old not in environment.containers.items.values()
+    assert "security_opt" not in environment.containers.creations[-1]
+
+
 def test_switch_stops_all_legacy_running_profiles(environment):
     a=install_profile(portal.ROOT,1)
     b=install_profile(portal.ROOT,2)
