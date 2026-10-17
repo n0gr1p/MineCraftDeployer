@@ -8,6 +8,7 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Switch profiles without changing the address friends use to join.
 - Keep each profile's mod files, configs, saves, whitelist and operators on disk.
 - Manage Java player access and operator status while the active Minecraft server is ready.
+- Change a server's RAM allocation after installation, independently for each profile.
 - Install from a CurseForge URL, a supported server ZIP, or a Fabric ServerPackCreator package (including a ZIP wrapped inside a ZIP).
 
 **This is not a hosting service.** You supply the Linux machine, Docker, storage, and (for remote friends) router configuration. Minecraft Java Edition only.
@@ -169,7 +170,7 @@ Under **Install a new server**, fill in:
 
 1. **Server name:** a friendly label such as `Family Adventure`.
 2. **Allowed Minecraft Java player names:** 1–50 Minecraft **Java** usernames, separated by commas or spaces. Names must be 3–16 letters, numbers, or underscores. **Periods, spaces within names, and Xbox gamertags are not valid** in this Java-only implementation.
-3. **RAM (GB):** heap size for the game, between 2 GB and `MCD_MAX_RAM_GB`.
+3. **RAM (GB):** initial heap size for the game, between 2 GB and `MCD_MAX_RAM_GB`. You can change this later without reinstalling.
 4. **Exactly one modpack source:** either a valid HTTPS CurseForge Minecraft modpack URL **or** a supported server ZIP.
 5. **Optional saved world ZIP:** a world containing **exactly one** `level.dat` somewhere in the archive. The containing save folder becomes the server's `world` directory.
 
@@ -199,6 +200,19 @@ Server ZIP uploads are limited to **4 GiB compressed**, with limits on the numbe
 - **Logs:** shows recent output from that profile's Docker container. Use this first when the container exits or players cannot connect.
 
 Players always use the **same Minecraft address and port**; the portal changes which profile is currently serving that address. **Stopped worlds remain on disk.**
+
+### Change RAM after installation
+
+Under **Installed servers**, click **Edit RAM** for the profile you want to change. Enter a whole number from **2** to your configured `MCD_MAX_RAM_GB` (12 GB by default), then click **Save RAM**.
+
+- **Running active server:** a confirmation explains that Minecraft will stop and restart. Anyone connected will be disconnected; choose a quiet time. The portal saves the new setting and recreates **only that Minecraft game container**, preserving the bind-mounted modpack/world files. Wait for Minecraft's ready message in **Logs** afterward.
+- **Stopped or inactive profile:** the new setting saves immediately, with **no game restart**. If an old Docker container already exists, the portal shows **applies on next start** until it recreates that container during activation. A new profile with no container simply uses the selected RAM on first start.
+- **No change:** selecting the existing value doesn't restart the server. The backend rejects a running-server change unless the client explicitly confirms the restart.
+- **If restarting with new RAM fails:** the portal attempts to restore the old saved RAM setting and relaunch the previous allocation. This rollback is **best-effort**, not a guarantee of game availability. Read the error and logs before further action; world files aren't intentionally deleted.
+
+The RAM number configures Minecraft's Java heap (`MEMORY`) **and** a Docker memory cap of approximately that number **plus 1 GiB** for non-heap overhead. Raising RAM beyond the host's available memory can cause system slowdowns or out-of-memory failures. Ensure enough physical RAM remains for Linux, Docker, and other running services.
+
+**You do not need to reupload a modpack or world when changing RAM.**
 
 ### Where the data lives
 
@@ -301,6 +315,8 @@ Always inspect logs and preserve the data directory before deleting or recreatin
 | `This ZIP does not contain a top-level server.jar` | Older portal builds required a ready-to-run JAR. Update to a build supporting Fabric ServerPackCreator and the nested-ZIP wrapper. If it still rejects the pack, it may use an unsupported installer format. |
 | Minecraft container says `running` but players cannot join | Minecraft may still be downloading/installing Fabric or loading mods. Open **Logs** and wait for its ready message. Also check server errors, whitelist, LAN connectivity and port forwarding. |
 | Server container shows `exited` | Open **Logs** and read the last relevant error before trying to restart. This is not automatically a network problem. |
+| RAM shows **applies on next start** | The profile has a saved heap size that differs from its existing stopped Docker container. Select/Start the server when convenient; the new container will use the saved RAM. |
+| New RAM setting fails to restart the server | Read the error and logs. The portal attempts to restore the previous RAM setting and service, but recovery is best-effort. Verify server readiness before inviting players. |
 | Player action says the game console isn't ready | The container may be running while Minecraft/RCON is still initializing. Wait for the startup-ready message, then try again; do not repeatedly restart. |
 | **Players** asks for one-time restart | Expected for profiles created before this feature. Confirm at a convenient time when friends aren't playing. |
 | TCP `25565` already in use | Run `sudo ss -ltnp` and look for `:25565`. Stop an unrelated **old Minecraft service** only after confirming what owns the port. |
@@ -317,7 +333,7 @@ When asking for help, share the **error message and relevant logs**, but **redac
 | `MCD_HOST_DATA` | Absolute host path for permanent Minecraft profiles and worlds | `/srv/minecraft-deployer/data` conventional Docker, or `/home/<user>/minecraft-deployer-data` with Snap |
 | `MCD_GAME_PORT` | The single Minecraft game port shared by all profiles | `25565` |
 | `MCD_PUBLIC_HOST` | IP/DNS displayed as the game's join address | Your LAN address for initial tests, public DNS for outside friends |
-| `MCD_MAX_RAM_GB` | Maximum heap size selectable at server creation | `12` |
+| `MCD_MAX_RAM_GB` | Maximum heap size selectable when creating **or editing** a server's RAM | `12` |
 | `CF_API_KEY` | Optional CurseForge API key for CurseForge URL imports | Empty |
 
 The portal binds TCP **8080** at the configured local IP. Game containers publish the chosen Minecraft port. Changing server ports or runtime security policies can cause the portal to replace old Docker game containers on their next activation, preserving data in `MCD_HOST_DATA`.
