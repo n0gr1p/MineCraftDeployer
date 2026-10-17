@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from app.pack_import import prepare_pack
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -70,8 +71,24 @@ def running(c):
     return c.status in ("running","restarting","paused")
 
 def check_launch(meta):
+    # An older portal version accepted an outer ZIP without preparing its contents.
+    # Repair its profile on first activation, before stopping any running game.
+    if meta["mode"]=="zip":
+        data=path_for(meta["id"])/"minecraft"
+        try:
+            detected=prepare_pack(data, safe_extract)
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(409,f"Cannot activate this pack: {exc}") from exc
+        if any(meta.get(key)!=val for key,val in detected.items()):
+            meta.update(detected)
+            metadata=path_for(meta["id"])/"meta.json"
+            staged=metadata.with_suffix(".tmp")
+            staged.write_text(json.dumps(meta))
+            staged.replace(metadata)
+    if meta["mode"]=="fabric" and not (path_for(meta["id"])/"minecraft"/"variables.txt").is_file():
+        raise HTTPException(409,"Fabric pack metadata is missing")
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
-        raise HTTPException(409,"This ZIP does not contain a top-level server.jar; it cannot be activated yet")
+        raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
 def get_or_create_container(meta):
     sid=meta["id"]
@@ -107,10 +124,17 @@ def get_or_create_container(meta):
     if meta["mode"]=="curseforge":
         env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"]})
         if CF_KEY: env["CF_API_KEY"]=CF_KEY
-    else:
+    elif meta["mode"]=="fabric":
+        env.update({"TYPE":"FABRIC",
+                    "VERSION":meta["minecraft_version"],
+                    "FABRIC_LOADER_VERSION":meta["loader_version"]})
+    elif meta["mode"]=="zip":
         env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
+    else:
+        raise HTTPException(409,"Unsupported server mode")
+    java_version=meta.get("java_version",21)
     return client.containers.create(
-        "itzg/minecraft-server:java21",name="mcd-"+sid,environment=env,
+        f"itzg/minecraft-server:java{java_version}",name="mcd-"+sid,environment=env,
         volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},
         ports={"25565/tcp":GAME_PORT},mem_limit=f'{meta["ram_gb"]+1}g',
         nano_cpus=400000000,restart_policy={"Name":"no"},
@@ -260,7 +284,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             await save_upload(pack,archive)
             safe_extract(archive,data)
             archive.unlink()
-            if (data/"manifest.json").exists(): raise ValueError("Client-export ZIP is not a ready-to-run server pack")
+            detected=prepare_pack(data,safe_extract)
         if world:
             archive=root/"world.zip"
             await save_upload(world,archive)
@@ -271,6 +295,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             shutil.copytree(candidates[0].parent,data/"world",dirs_exist_ok=True)
             shutil.rmtree(root/"import")
         meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist}
+        if pack: meta.update(detected)
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
