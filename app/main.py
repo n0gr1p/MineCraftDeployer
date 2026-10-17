@@ -229,7 +229,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),cf_url:str=Form(""
     auth(authorization)
     if not re.fullmatch("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}",name): raise HTTPException(400,"Invalid server name")
     if not 2<=ram_gb<=MAX_RAM: raise HTTPException(400,"Invalid RAM allocation")
-    if bool(cf_url)!=bool(pack): raise HTTPException(400,"Supply exactly one CurseForge URL or server ZIP")
+    if bool(cf_url)==bool(pack): raise HTTPException(400,"Supply exactly one CurseForge URL or server ZIP")
     if cf_url:
         url=urlparse(cf_url)
         if url.scheme!="https" or url.hostname not in ("curseforge.com","www.curseforge.com") or not url.path.startswith("/minecraft/modpacks/"):
