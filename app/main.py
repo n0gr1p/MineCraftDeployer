@@ -6,7 +6,7 @@ import docker
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
 from app.pack_import import prepare_pack
 
@@ -134,9 +134,14 @@ def get_or_create_container(meta):
         incompatible_security=any(
             option.startswith("no-new-privileges") for option in security_options
         )
-        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c):
-            # Migrate legacy ports and containers with an incompatible security option.
-            # The data directory is bind-mounted; removing the container never deletes it.
+        requested_ram=int(meta["ram_gb"])
+        existing_heap=minecraft_env(c).get("MEMORY")
+        existing_limit=c.attrs.get("HostConfig",{}).get("Memory")
+        ram_mismatch=(existing_heap!=f"{requested_ram}G"
+                      or existing_limit!=(requested_ram+1)*1024**3)
+        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch:
+            # Recreate on changed port, incompatible options, or changed RAM/heap.
+            # /data is a bind mount. Removing the game container does not delete game files.
             c.update(restart_policy={"Name":"no"})
             if running(c):
                 c.stop(timeout=45)
@@ -284,8 +289,15 @@ def state(meta):
     c=container_for(meta["id"])
     if c: c.reload()
     allowed,operators=player_lists(meta)
+    requested_ram=int(meta["ram_gb"])
+    pending_ram=bool(c and (
+        minecraft_env(c).get("MEMORY")!=f"{requested_ram}G"
+        or c.attrs.get("HostConfig",{}).get("Memory")!=(requested_ram+1)*1024**3
+    ))
     return {"id":meta["id"],"name":meta["name"],"port":GAME_PORT,
-            "ram_gb":meta["ram_gb"],"status":c.status if c else "not-created",
+            "ram_gb":meta["ram_gb"],"max_ram_gb":MAX_RAM,
+            "ram_change_pending":pending_ram,
+            "status":c.status if c else "not-created",
             "is_active":active_id()==meta["id"],
             "whitelist":allowed,
             "ops":operators,
@@ -346,6 +358,69 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
+
+class RamChange(BaseModel):
+    ram_gb:int=Field(ge=2)
+    restart_running:bool=False
+
+
+@app.patch("/api/servers/{sid}/ram")
+def update_ram(sid:str,change:RamChange,authorization:str|None=Header(None)):
+    auth(authorization)
+    if change.ram_gb>MAX_RAM:
+        raise HTTPException(400,f"RAM must be between 2 and {MAX_RAM} GB")
+
+    with deployment_lock():
+        meta=meta_for(sid)
+        old_ram=int(meta["ram_gb"])
+        if change.ram_gb==old_ram:
+            return state(meta)
+
+        c=container_for(sid)
+        if c: c.reload()
+        game_running=bool(c and running(c))
+        if game_running:
+            if active_id()!=sid:
+                raise HTTPException(409,"Cannot change RAM on an unexpected running inactive server")
+            if not change.restart_running:
+                raise HTTPException(409,"Changing RAM requires a Minecraft restart. Confirm the restart before saving.")
+
+        # Stopped servers store the new allocation; get_or_create_container()
+        # applies it on the next activation by comparing heap and Docker memory cap.
+        previous=meta.copy()
+        meta["ram_gb"]=change.ram_gb
+        try:
+            write_meta(meta)
+        except OSError as exc:
+            raise HTTPException(409,f"Could not save RAM setting: {exc}") from exc
+        if not game_running:
+            return state(meta)
+
+        try:
+            # Only the selected game container is replaced, never its /data directory.
+            new=get_or_create_container(meta)
+            new.reload()
+            if new.status!="running": new.start()
+            new.update(restart_policy={"Name":"unless-stopped"})
+            return state(meta)
+        except (docker.errors.DockerException,RuntimeError,OSError) as exc:
+            # Best effort restore the original allocation and Minecraft service.
+            rollback_error=None
+            try:
+                write_meta(previous)
+                restore=get_or_create_container(previous)
+                restore.reload()
+                if restore.status!="running": restore.start()
+                restore.update(restart_policy={"Name":"unless-stopped"})
+            except (docker.errors.DockerException,RuntimeError,OSError) as rollback:
+                rollback_error=str(rollback)
+            detail=f"Could not change RAM: {exc}"
+            if rollback_error:
+                detail+=f"; restoring the old {old_ram} GB server also failed: {rollback_error}"
+            else:
+                detail+=f"; previous {old_ram} GB allocation restored"
+            raise HTTPException(409,detail) from exc
+
 
 class PlayerCommand(BaseModel):
     action:Literal["whitelist_add","whitelist_remove","op","deop"]
