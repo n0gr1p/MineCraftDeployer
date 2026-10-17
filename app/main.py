@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Literal
 from app.pack_import import prepare_pack
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
@@ -70,6 +71,38 @@ def all_managed():
 def running(c):
     return c.status in ("running","restarting","paused")
 
+def minecraft_env(c):
+    return dict(item.split("=",1) for item in c.attrs.get("Config",{}).get("Env",[])
+                if "=" in item)
+
+def player_controls_ready(c):
+    env=minecraft_env(c)
+    return (env.get("ENABLE_RCON","").upper()=="TRUE"
+            and env.get("EXISTING_WHITELIST_FILE","").upper()=="SKIP"
+            and env.get("EXISTING_OPS_FILE","").upper()=="SKIP")
+
+def listed_players(meta,filename,fallback):
+    # Minecraft's persisted JSON is authoritative, including changes via console.
+    file=path_for(meta["id"])/"minecraft"/filename
+    try:
+        entries=json.loads(file.read_text())
+        if not isinstance(entries,list): return fallback
+        names=[p.get("name") for p in entries if isinstance(p,dict)]
+        return list(dict.fromkeys(name for name in names
+                         if isinstance(name,str) and re.fullmatch(r"[A-Za-z0-9_]{3,16}",name)))
+    except (OSError,ValueError):
+        return fallback
+
+def player_lists(meta):
+    return (listed_players(meta,"whitelist.json",meta.get("whitelist",[])),
+            listed_players(meta,"ops.json",meta.get("ops",[])))
+
+def write_meta(meta):
+    metadata=path_for(meta["id"])/"meta.json"
+    staged=metadata.with_name("."+uuid.uuid4().hex+".tmp")
+    staged.write_text(json.dumps(meta))
+    staged.replace(metadata)
+
 def check_launch(meta):
     # An older portal version accepted an outer ZIP without preparing its contents.
     # Repair its profile on first activation, before stopping any running game.
@@ -101,7 +134,7 @@ def get_or_create_container(meta):
         incompatible_security=any(
             option.startswith("no-new-privileges") for option in security_options
         )
-        if ports!={str(GAME_PORT)} or incompatible_security:
+        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c):
             # Migrate legacy ports and containers with an incompatible security option.
             # The data directory is bind-mounted; removing the container never deletes it.
             c.update(restart_policy={"Name":"no"})
@@ -114,17 +147,19 @@ def get_or_create_container(meta):
     if c:
         return c
     env={"EULA":"TRUE","MEMORY":f'{meta["ram_gb"]}G',"ONLINE_MODE":"TRUE",
-         "ENABLE_RCON":"FALSE"}
+         "ENABLE_RCON":"TRUE","RCON_PASSWORD":secrets.token_urlsafe(32),
+         "EXISTING_WHITELIST_FILE":"SKIP","EXISTING_OPS_FILE":"SKIP"}
     allowed=meta.get("whitelist",[])
     if allowed:
         # A public game port must only admit the names entered at installation.
         env.update({"ENABLE_WHITELIST":"TRUE","ENFORCE_WHITELIST":"TRUE",
-                    "WHITELIST":",".join(allowed),
-                    "EXISTING_WHITELIST_FILE":"MERGE"})
+                    "WHITELIST":",".join(allowed)})
     else:
         # Backward compatibility for profiles created before player entry existed.
         # Unrestricted game joining is clearly indicated in the dashboard.
         env["ENABLE_WHITELIST"]="FALSE"
+    ops=meta.get("ops",[])
+    if ops: env["OPS"]=",".join(ops)
     if meta["mode"]=="curseforge":
         env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"]})
         if CF_KEY: env["CF_API_KEY"]=CF_KEY
@@ -248,10 +283,13 @@ async def save_upload(upload,target):
 def state(meta):
     c=container_for(meta["id"])
     if c: c.reload()
+    allowed,operators=player_lists(meta)
     return {"id":meta["id"],"name":meta["name"],"port":GAME_PORT,
             "ram_gb":meta["ram_gb"],"status":c.status if c else "not-created",
             "is_active":active_id()==meta["id"],
-            "whitelist":meta.get("whitelist",[]),
+            "whitelist":allowed,
+            "ops":operators,
+            "player_controls_ready":bool(c and player_controls_ready(c)),
             "mode":meta.get("mode","zip"),
             "minecraft_version":meta.get("minecraft_version"),
             "loader_version":meta.get("loader_version"),
@@ -301,13 +339,82 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             if len(candidates)!=1: raise ValueError("World ZIP must contain exactly one level.dat")
             shutil.copytree(candidates[0].parent,data/"world",dirs_exist_ok=True)
             shutil.rmtree(root/"import")
-        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist}
+        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist,"ops":[]}
         if pack: meta.update(detected)
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
+
+class PlayerCommand(BaseModel):
+    action:Literal["whitelist_add","whitelist_remove","op","deop"]
+    username:str
+
+_SUCCESS={
+    "whitelist_add":("added ","to the whitelist"),
+    "whitelist_remove":("removed ","from the whitelist"),
+    "op":("made ","a server operator"),
+    "deop":("made ","no longer a server operator"),
+}
+
+@app.post("/api/servers/{sid}/players")
+def manage_player(sid:str,command:PlayerCommand,authorization:str|None=Header(None)):
+    auth(authorization)
+    name=command.username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,16}",name):
+        raise HTTPException(400,"Enter a valid Minecraft Java username (3-16 letters, numbers, underscores)")
+    with deployment_lock():
+        meta=meta_for(sid)
+        if active_id()!=sid:
+            raise HTTPException(409,"Select this server as active before changing players")
+        c=container_for(sid)
+        if not c:
+            raise HTTPException(409,"Start the selected server before changing players")
+        c.reload()
+        if c.status!="running":
+            raise HTTPException(409,"Minecraft is not running; start the server before changing players")
+        if not player_controls_ready(c):
+            raise HTTPException(409,"Enable Players first; this requires a one-time server restart")
+
+        allowed,ops=player_lists(meta)
+        action=command.action
+        if action=="op" and name.casefold() not in {n.casefold() for n in allowed}:
+            raise HTTPException(409,"Whitelist the player before granting operator privileges")
+        if action=="whitelist_remove" and name.casefold() in {n.casefold() for n in ops}:
+            raise HTTPException(409,"Revoke operator privileges before removing a player from the whitelist")
+        target_ops=action in ("op","deop")
+        current=ops if target_ops else allowed
+        present=name.casefold() in {n.casefold() for n in current}
+        add=action in ("op","whitelist_add")
+        if present==add:
+            return state(meta)
+
+        args={
+            "whitelist_add":["rcon-cli","whitelist","add",name],
+            "whitelist_remove":["rcon-cli","whitelist","remove",name],
+            "op":["rcon-cli","op",name],
+            "deop":["rcon-cli","deop",name],
+        }[action]
+        try:
+            result=c.exec_run(args,stdout=True,stderr=True)
+        except docker.errors.DockerException as exc:
+            raise HTTPException(409,f"Could not contact Minecraft console: {exc}") from exc
+        output=result.output.decode(errors="replace") if isinstance(result.output,bytes) else str(result.output)
+        expected=_SUCCESS[action]
+        if result.exit_code!=0 or not all(part in output.lower() for part in expected):
+            raise HTTPException(409,"Minecraft did not confirm the change. Check that the server has finished starting. Console reply: "+output[:500])
+
+        # Maintain portal metadata as a fallback when Minecraft JSON is absent.
+        destination="ops" if target_ops else "whitelist"
+        updated=current+[name] if add else [n for n in current if n.casefold()!=name.casefold()]
+        meta[destination]=updated
+        try:
+            write_meta(meta)
+        except OSError as exc:
+            raise HTTPException(409,"Minecraft applied the command, but saving portal metadata failed; refresh Players and inspect the logs") from exc
+        return state(meta)
+
 
 class Command(BaseModel):
     action:str
