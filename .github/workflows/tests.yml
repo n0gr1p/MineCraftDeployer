@@ -18,4 +18,4 @@ jobs:
       - name: Verify single-server switching
         env:
           MCD_TOKEN: unit-testing-secret-with-more-than-24-characters
-        run: pytest -q
+        run: python -m pytest -q
