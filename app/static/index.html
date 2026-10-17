@@ -73,6 +73,9 @@
       <form id="create">
         <label for="name">Server name</label>
         <input id="name" name="name" required maxlength="40" placeholder="Our Friends World">
+        <label for="players">Allowed Minecraft Java player names</label>
+        <input id="players" name="players" required placeholder="DaughterName, FriendName" spellcheck="false" autocomplete="off">
+        <p class="muted help">Required for the internet-accessible game. Comma-separated Minecraft Java usernames (not Xbox gamertags).</p>
         <label for="ram">RAM (GB)</label>
         <input id="ram" name="ram_gb" type="number" min="2" max="12" value="6">
         <label for="cfUrl">CurseForge modpack URL</label>
@@ -81,7 +84,7 @@
         <input id="pack" name="pack" type="file" accept=".zip">
         <label for="world">Optional saved world ZIP</label>
         <input id="world" name="world" type="file" accept=".zip">
-        <p class="muted help">ZIP packs currently need a top-level server.jar. World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play.</p>
+        <p class="muted help">ZIP packs currently need a top-level server.jar. World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play. CurseForge API key is optional for the Java 21 runtime.</p>
         <button type="submit">Install Server</button>
       </form>
     </section>
@@ -151,7 +154,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM · '+s.status;
+        details.textContent=s.ram_gb+' GB RAM · '+s.status+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
