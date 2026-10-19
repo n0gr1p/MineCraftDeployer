@@ -1,4 +1,4 @@
-import fcntl, json, os, re, secrets, shutil, uuid, zipfile
+import fcntl, json, os, re, secrets, shutil, tarfile, uuid, zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 from app.pack_import import prepare_pack
+from app import backups
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -537,6 +538,34 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
+
+@app.get("/api/servers/{sid}/backups")
+def list_server_backups(sid:str,authorization:str|None=Header(None)):
+    auth(authorization)
+    path_for(sid)
+    try:
+        return backups.list_backups(sid)
+    except backups.BackupUnavailable as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@app.post("/api/servers/{sid}/backups")
+def create_server_backup(sid:str,authorization:str|None=Header(None)):
+    auth(authorization)
+    with deployment_lock():
+        profile=path_for(sid)
+        c=container_for(sid)
+        if c:
+            c.reload()
+            if c.status not in ("created","exited"):
+                raise HTTPException(409,"Stop this Minecraft server before creating an offline backup. No live-world backup is implemented yet.")
+        try:
+            return backups.create_offline_backup(sid,profile)
+        except backups.BackupUnavailable as exc:
+            raise HTTPException(409,str(exc)) from exc
+        except (OSError,tarfile.TarError) as exc:
+            raise HTTPException(409,f"Backup failed; incomplete temporary backup was discarded: {exc}") from exc
+
 
 class DeleteServerConfirmation(BaseModel):
     confirm_name:str
