@@ -103,6 +103,102 @@ def write_meta(meta):
     staged.write_text(json.dumps(meta))
     staged.replace(metadata)
 
+# Curated GUI settings. Never expose arbitrary file paths, environment names,
+# level generation, networking, whitelist, RCON credentials, or Docker flags.
+PROPERTY_SCHEMA={
+    "pvp":("PVP","bool",True),
+    "difficulty":("DIFFICULTY","choice","easy",("peaceful","easy","normal","hard")),
+    "gamemode":("MODE","choice","survival",("survival","creative","adventure","spectator")),
+    "allow-flight":("ALLOW_FLIGHT","bool",False),
+    "enable-command-block":("ENABLE_COMMAND_BLOCK","bool",False),
+    "spawn-monsters":("SPAWN_MONSTERS","bool",True),
+    "spawn-animals":("SPAWN_ANIMALS","bool",True),
+    "spawn-npcs":("SPAWN_NPCS","bool",True),
+    "allow-nether":("ALLOW_NETHER","bool",True),
+    "max-players":("MAX_PLAYERS","int",20,1,100),
+    "view-distance":("VIEW_DISTANCE","int",10,3,16),
+    "spawn-protection":("SPAWN_PROTECTION","int",16,0,128),
+}
+DREGORA_LOCKED={
+    "difficulty":"hard",
+    "allow-flight":True,
+    "enable-command-block":True,
+    "view-distance":10,
+}
+
+
+def locked_properties(meta):
+    return DREGORA_LOCKED if meta.get("pack_format")=="rlcraft-dregora" else {}
+
+
+def normalized_setting(key,value):
+    spec=PROPERTY_SCHEMA[key]
+    kind=spec[1]
+    if kind=="bool":
+        if type(value) is not bool: raise ValueError(f"{key} must be on or off")
+        return value
+    if kind=="int":
+        if type(value) is not int or not spec[3]<=value<=spec[4]:
+            raise ValueError(f"{key} must be between {spec[3]} and {spec[4]}")
+        return value
+    if not isinstance(value,str) or value not in spec[3]:
+        raise ValueError(f"{key} must be one of: {', '.join(spec[3])}")
+    return value
+
+
+def setting_env_value(value):
+    if isinstance(value,bool): return "TRUE" if value else "FALSE"
+    return str(value)
+
+
+def selected_setting_env(meta):
+    return {PROPERTY_SCHEMA[key][0]:setting_env_value(value)
+            for key,value in meta.get("server_properties",{}).items()
+            if key in PROPERTY_SCHEMA and key not in locked_properties(meta)}
+
+
+def settings_pending(c,meta):
+    if not c: return False
+    env=minecraft_env(c)
+    return any(env.get(key)!=value
+               for key,value in selected_setting_env(meta).items())
+
+
+def read_properties(meta):
+    # Existing server.properties, when available, is the baseline rather than
+    # overwriting a modpack's non-default settings with vanilla defaults.
+    path=path_for(meta["id"])/"minecraft"/"server.properties"
+    properties={}
+    try:
+        for line in path.read_text(encoding="utf-8",errors="replace").splitlines():
+            if "=" in line and not line.lstrip().startswith(("#","!")):
+                key,value=line.split("=",1)
+                properties[key.strip()]=value.strip()
+    except OSError:
+        pass
+
+    values={}
+    for key,spec in PROPERTY_SCHEMA.items():
+        value=properties.get(key)
+        try:
+            if value is None: raise ValueError("not in file")
+            if spec[1]=="bool":
+                if value.lower() not in ("true","false"): raise ValueError("bad bool")
+                converted=value.lower()=="true"
+            elif spec[1]=="int":
+                converted=int(value)
+            else:
+                converted=value.lower()
+            values[key]=normalized_setting(key,converted)
+        except ValueError:
+            values[key]=spec[2]
+
+    values.update({key:value for key,value in meta.get("server_properties",{}).items()
+                   if key in PROPERTY_SCHEMA})
+    values.update(locked_properties(meta))
+    return values
+
+
 def check_launch(meta):
     # An older portal version accepted an outer ZIP without preparing its contents.
     # Repair its profile on first activation, before stopping any running game.
@@ -143,7 +239,7 @@ def get_or_create_container(meta):
         existing_limit=c.attrs.get("HostConfig",{}).get("Memory")
         ram_mismatch=(existing_heap!=f"{requested_ram}G"
                       or existing_limit!=(requested_ram+1)*1024**3)
-        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch:
+        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch or settings_pending(c,meta):
             # Recreate on changed port, incompatible options, or changed RAM/heap.
             # /data is a bind mount. Removing the game container does not delete game files.
             c.update(restart_policy={"Name":"no"})
@@ -191,6 +287,9 @@ def get_or_create_container(meta):
         env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
     else:
         raise HTTPException(409,"Unsupported server mode")
+    # User-edited settings are applied on container creation. Existing containers
+    # are recreated on activation/restart when their saved settings differ.
+    env.update(selected_setting_env(meta))
     java_version=meta.get("java_version",21)
     return client.containers.create(
         f"itzg/minecraft-server:java{java_version}",name="mcd-"+sid,environment=env,
@@ -264,9 +363,17 @@ def restart_active(sid):
         c=container_for(sid)
         if not c: raise HTTPException(409,"Server has not been started yet")
         try:
-            c.restart(timeout=45)
+            # A normal Docker restart cannot change environment variables.
+            # Recreate only when saved settings or RAM differ from the container.
+            newer=get_or_create_container(meta)
+            if newer is c:
+                c.restart(timeout=45)
+            else:
+                newer.reload()
+                if newer.status!="running": newer.start()
+                newer.update(restart_policy={"Name":"unless-stopped"})
             return state(meta)
-        except docker.errors.DockerException as exc:
+        except (docker.errors.DockerException,RuntimeError) as exc:
             raise HTTPException(409,f"Could not restart server: {exc}") from exc
 
 def safe_extract(source,target):
@@ -312,6 +419,9 @@ def state(meta):
     return {"id":meta["id"],"name":meta["name"],"port":GAME_PORT,
             "ram_gb":meta["ram_gb"],"max_ram_gb":MAX_RAM,
             "ram_change_pending":pending_ram,
+            "server_properties":read_properties(meta),
+            "locked_properties":list(locked_properties(meta)),
+            "settings_pending":settings_pending(c,meta),
             "status":c.status if c else "not-created",
             "is_active":active_id()==meta["id"],
             "whitelist":allowed,
@@ -484,6 +594,79 @@ def update_ram(sid:str,change:RamChange,authorization:str|None=Header(None)):
             else:
                 detail+=f"; previous {old_ram} GB allocation restored"
             raise HTTPException(409,detail) from exc
+
+
+class SettingsUpdate(BaseModel):
+    properties:dict[str,bool|int|str]
+
+
+@app.patch("/api/servers/{sid}/settings")
+def update_settings(sid:str,change:SettingsUpdate,authorization:str|None=Header(None)):
+    auth(authorization)
+    with deployment_lock():
+        meta=meta_for(sid)
+        c=container_for(sid)
+        if c:
+            c.reload()
+            if running(c) and active_id()!=sid:
+                raise HTTPException(409,"Cannot modify an unexpectedly running inactive server")
+        current=dict(meta.get("server_properties",{}))
+        locks=locked_properties(meta)
+        for key,value in change.properties.items():
+            if key not in PROPERTY_SCHEMA:
+                raise HTTPException(400,f"Unsupported server property: {key}")
+            if key in locks:
+                raise HTTPException(409,
+                    f"{key} is locked for Dregora's required world-generation compatibility")
+            try:
+                current[key]=normalized_setting(key,value)
+            except ValueError as exc:
+                raise HTTPException(400,str(exc)) from exc
+        meta["server_properties"]=current
+        try:
+            write_meta(meta)
+        except OSError as exc:
+            raise HTTPException(409,f"Could not save server settings: {exc}") from exc
+        return state(meta)
+
+
+class ConsoleCommand(BaseModel):
+    command:str=Field(min_length=1,max_length=256)
+
+
+@app.post("/api/servers/{sid}/console")
+def run_console(sid:str,request:ConsoleCommand,authorization:str|None=Header(None)):
+    auth(authorization)
+    command=request.command.strip()
+    if command.startswith("/"):
+        command=command[1:]
+    if not command or any(ord(ch)<32 or ord(ch)==127 for ch in command):
+        raise HTTPException(400,"Enter one Minecraft command without newlines or control characters")
+    # Never invoke a shell: RCON commands are one argv entry after 'rcon-cli'.
+    # Unlike the restricted player manager this is fully privileged Minecraft
+    # console access; protect the portal token and do not expose TCP 8080.
+    with deployment_lock():
+        meta_for(sid)
+        if active_id()!=sid:
+            raise HTTPException(409,"Console is only available on the selected server")
+        c=container_for(sid)
+        if not c:
+            raise HTTPException(409,"Start Minecraft before using its console")
+        c.reload()
+        if c.status!="running":
+            raise HTTPException(409,"Minecraft is not running")
+        if not player_controls_ready(c):
+            raise HTTPException(409,"Console requires the RCON-enabled game container. Use Enable Players first.")
+        try:
+            result=c.exec_run(["rcon-cli",command],stdout=True,stderr=True)
+        except docker.errors.DockerException as exc:
+            raise HTTPException(409,f"Could not reach Minecraft console: {exc}") from exc
+        reply=(result.output.decode(errors="replace") if isinstance(result.output,bytes)
+               else str(result.output))
+        if result.exit_code!=0:
+            raise HTTPException(409,
+                "Minecraft console request failed. Is the server ready? Reply: "+reply[:1500])
+        return {"output":reply[:8000],"command":command}
 
 
 class PlayerCommand(BaseModel):
