@@ -969,3 +969,13 @@ def test_settings_changes_survive_profile_switching_and_restart(environment):
     portal.activate(a)
     assert environment.containers.creations[-1]["environment"]["PVP"]=="FALSE"
     assert portal.state(portal.meta_for(a))["settings_pending"] is False
+
+
+def test_legacy_forge_numeric_game_mode_and_difficulty_display(environment):
+    sid=install_profile(portal.ROOT,73)
+    (portal.ROOT/sid/"minecraft"/"server.properties").write_text(
+        "difficulty=3\ngamemode=1\npvp=true\n")
+    props=portal.state(portal.meta_for(sid))["server_properties"]
+    assert props["difficulty"]=="hard"
+    assert props["gamemode"]=="creative"
+    assert props["pvp"] is True
