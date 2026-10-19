@@ -14,6 +14,10 @@ services:
       MCD_MAX_RAM_GB: ${MCD_MAX_RAM_GB:-12}
       MCD_GAME_PORT: ${MCD_GAME_PORT:-25565}
       CF_API_KEY: ${CF_API_KEY:-}
+      MCD_BACKUP_HOST_DIR: ${MCD_BACKUP_HOST_DIR:-}
+      MCD_BACKUP_VOLUME_UUID: ${MCD_BACKUP_VOLUME_UUID:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${MCD_HOST_DATA:?Set MCD_HOST_DATA}:${MCD_HOST_DATA:?Set MCD_HOST_DATA}
+      # Defaults to /tmp when disabled; the UUID marker check prohibits writes.
+      - ${MCD_BACKUP_HOST_DIR:-/tmp}:/backups:rw
