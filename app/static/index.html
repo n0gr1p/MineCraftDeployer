@@ -126,8 +126,10 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton'))
-        btn.disabled=value;
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton')){
+        const confirmation=btn.closest('.delete-panel')?.querySelector('input');
+        btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
+      }
     }
     async function doAction(id,cmd,purpose=''){
       if(busy||!id)return;
@@ -251,6 +253,7 @@
       const submit=document.createElement('button');
       submit.type='submit';submit.className='danger deleteButton';
       submit.textContent='Permanently Delete Server';submit.disabled=true;
+      submit.dataset.confirmName=s.name;
       input.addEventListener('input',()=>{submit.disabled=busy||input.value!==s.name});
       form.append(label,input,submit);
       form.onsubmit=event=>{event.preventDefault();deleteProfile(s)};
