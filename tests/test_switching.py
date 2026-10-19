@@ -1132,7 +1132,7 @@ def backup_drive(tmp_path,monkeypatch):
     monkeypatch.setattr(backups,"BACKUP_VOLUME_UUID","c3eac39c-a160-4a6d-b816-6c6e599224e8")
     original=Path.is_mount
     monkeypatch.setattr(Path,"is_mount",lambda p: p==disk or original(p))
-    (disk/backups.MARKER).write_text(backups.BACKUP_VOLUME_UUID+"\\n")
+    (disk/backups.MARKER).write_text(backups.BACKUP_VOLUME_UUID+chr(10))
     return disk
 
 
