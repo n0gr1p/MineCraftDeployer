@@ -653,3 +653,132 @@ def test_dregora_malformed_pack_is_rejected_without_starting_any_game(environmen
             files={"pack":("dregora.zip",dregora_pack(readme="Forge 9999.9999"),"application/zip")})
     assert response.status_code==400
     assert "Unrecognized Dregora server README" in response.json()["detail"]
+
+
+def delete_profile(sid,name,word="DELETE"):
+    return portal.delete_server(sid,portal.DeleteServerConfirmation(
+        confirm_name=name,confirm_word=word),
+        authorization="Bearer "+portal.TOKEN)
+
+
+def test_delete_unstarted_inactive_profile_removes_its_data_only(environment):
+    active=install_profile(portal.ROOT,41)
+    target=install_profile(portal.ROOT,42)
+    portal.activate(active)
+    target_dir=portal.ROOT/target
+    (target_dir/"minecraft"/"world").mkdir()
+    (target_dir/"minecraft"/"world"/"level.dat").write_bytes(b"delete-only-this-world")
+    result=delete_profile(target,"Pack 42")
+    assert result=={"deleted":True,"id":target,"name":"Pack 42"}
+    assert not target_dir.exists()
+    assert (portal.ROOT/active/"minecraft"/"server.jar").exists()
+    assert environment.containers.items[active].status=="running"
+    assert portal.active_id()==active
+
+
+def test_delete_stopped_inactive_container_and_world(environment):
+    a=install_profile(portal.ROOT,43)
+    b=install_profile(portal.ROOT,44)
+    portal.activate(a)
+    portal.activate(b)
+    assert environment.containers.items[a].status=="exited"
+    assert environment.containers.items[b].status=="running"
+    (portal.ROOT/a/"minecraft"/"world").mkdir()
+    (portal.ROOT/a/"minecraft"/"world"/"level.dat").write_bytes(b"old save")
+    deleted=delete_profile(a,"Pack 43")
+    assert deleted["deleted"] is True
+    assert a not in environment.containers.items
+    assert not (portal.ROOT/a).exists()
+    assert (portal.ROOT/b/"minecraft"/"server.jar").exists()
+    assert portal.active_id()==b
+    assert environment.containers.items[b].status=="running"
+
+
+def test_delete_never_removes_selected_profile_even_if_stopped(environment):
+    sid=install_profile(portal.ROOT,45)
+    portal.activate(sid)
+    with pytest.raises(HTTPException) as e:
+        delete_profile(sid,"Pack 45")
+    assert e.value.status_code==409
+    assert environment.containers.items[sid].status=="running"
+    portal.stop_active(sid)
+    with pytest.raises(HTTPException) as e:
+        delete_profile(sid,"Pack 45")
+    assert e.value.status_code==409
+    assert (portal.ROOT/sid/"minecraft"/"server.jar").is_file()
+    assert sid in environment.containers.items
+
+
+def test_delete_refuses_unexpected_running_inactive_container(environment):
+    selected=install_profile(portal.ROOT,46)
+    other=install_profile(portal.ROOT,47)
+    portal.activate(selected)
+    stray=FakeContainer(environment.containers,other,25566,status="running")
+    environment.containers.items[other]=stray
+    with pytest.raises(HTTPException) as e:
+        delete_profile(other,"Pack 47")
+    assert e.value.status_code==409
+    assert (portal.ROOT/other/"meta.json").is_file()
+    assert stray.status=="running"
+
+
+def test_delete_rejects_wrong_name_and_never_touches_files(environment):
+    sid=install_profile(portal.ROOT,48)
+    with pytest.raises(HTTPException) as e:
+        delete_profile(sid,"pack 48")
+    assert e.value.status_code==400
+    assert (portal.ROOT/sid/"meta.json").is_file()
+    assert (portal.ROOT/sid/"minecraft"/"server.jar").is_file()
+
+
+def test_delete_api_checks_bearer_token_and_confirmation_literal(environment):
+    sid=install_profile(portal.ROOT,49)
+    path="/api/servers/"+sid+"/delete"
+    headers={"Authorization":"Bearer "+portal.TOKEN}
+    with TestClient(portal.app) as http:
+        denied=http.post(path,json={"confirm_name":"Pack 49","confirm_word":"DELETE"})
+        assert denied.status_code==401
+        missing=http.post(path,headers=headers,json={"confirm_name":"Pack 49"})
+        assert missing.status_code==422
+        wrong_word=http.post(path,headers=headers,json={"confirm_name":"Pack 49","confirm_word":"YES"})
+        assert wrong_word.status_code==422
+        wrong_name=http.post(path,headers=headers,
+            json={"confirm_name":"Pack 48","confirm_word":"DELETE"})
+        assert wrong_name.status_code==400
+        assert (portal.ROOT/sid/"minecraft"/"server.jar").exists()
+        ok=http.post(path,headers=headers,
+            json={"confirm_name":"Pack 49","confirm_word":"DELETE"})
+        assert ok.status_code==200,ok.text
+        assert ok.json()["deleted"] is True
+        assert not (portal.ROOT/sid).exists()
+        assert http.get("/api/servers",headers=headers).json()==[]
+
+
+def test_delete_docker_failure_preserves_profile_files(environment,monkeypatch):
+    target=install_profile(portal.ROOT,50)
+    portal.activate(target)
+    other=install_profile(portal.ROOT,51)
+    portal.activate(other)
+    c=environment.containers.items[target]
+    assert c.status=="exited"
+    def fail_remove():
+        raise docker.errors.APIError("mock Docker permission error")
+    monkeypatch.setattr(c,"remove",fail_remove)
+    with pytest.raises(HTTPException) as e:
+        delete_profile(target,"Pack 50")
+    assert e.value.status_code==409
+    assert "profile files preserved" in str(e.value.detail)
+    assert target in environment.containers.items
+    assert (portal.ROOT/target/"minecraft"/"server.jar").exists()
+    assert environment.containers.items[other].status=="running"
+
+
+def test_delete_refuses_bad_directory_identity(environment):
+    sid=install_profile(portal.ROOT,52)
+    meta=portal.meta_for(sid)
+    meta["id"]=f"{999:032x}"
+    (portal.ROOT/sid/"meta.json").write_text(json.dumps(meta))
+    with pytest.raises(HTTPException) as e:
+        delete_profile(sid,"Pack 52")
+    assert e.value.status_code==409
+    assert (portal.ROOT/sid/"minecraft"/"server.jar").exists()
