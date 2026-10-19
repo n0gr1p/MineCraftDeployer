@@ -17,7 +17,7 @@ BACKUP_ROOT = Path("/backups")
 BACKUP_HOST_DIR = os.getenv("MCD_BACKUP_HOST_DIR", "")
 BACKUP_VOLUME_UUID = os.getenv("MCD_BACKUP_VOLUME_UUID", "").lower()
 MARKER = ".minecraftdeployer-volume-uuid"
-BACKUP_RE = re.compile(r"backup-(\\d{8}T\\d{6}Z)-([0-9a-f]{8})\\.tar")
+BACKUP_RE = re.compile(r"backup-([0-9]{8}T[0-9]{6}Z)-([0-9a-f]{8})[.]tar")
 
 
 class BackupUnavailable(RuntimeError):
