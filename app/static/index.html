@@ -31,7 +31,11 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.delete-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .delete-panel{border-color:#bc735c}
+    .delete-panel input{max-width:320px}
+    .delete-panel button{margin-top:10px}
+    .delete-panel label{margin:0}
     .ram-panel input{max-width:125px}
     .ram-panel label{margin:0}
     .ram-panel .help{margin:8px 0}
@@ -108,7 +112,7 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null;
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
       const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
@@ -122,7 +126,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton'))
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton'))
         btn.disabled=value;
     }
     async function doAction(id,cmd,purpose=''){
@@ -203,6 +207,54 @@
         note.textContent='The saved RAM setting will take effect on the next start.';
         panel.append(note);
       }
+      return panel;
+    }
+    async function deleteProfile(s){
+      if(busy||s.is_active)return;
+      const panel=document.getElementById('delete-'+s.id);
+      const name=panel?.querySelector('input')?.value;
+      if(name!==s.name){message('Type the exact server name before deleting.');return;}
+      if(!confirm('PERMANENTLY DELETE "'+s.name+'"? This destroys its saved worlds, mods, configuration, logs, and Docker game container. NO UNDO.')){
+        return;
+      }
+      setBusy(true);message('Deleting '+s.name+' permanently…');
+      try{
+        await request('/servers/'+s.id+'/delete',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({confirm_name:name,confirm_word:'DELETE'})
+        });
+        openDeleteId=null;
+        openPlayersId=null;
+        openRamId=null;
+        await refresh(true);
+        message('Server "'+s.name+'" permanently deleted.');
+      }catch(error){
+        message(error.message);
+        await refresh(true);
+      }finally{setBusy(false);paint()}
+    }
+    function deletePanel(s){
+      const panel=document.createElement('div');
+      panel.className='delete-panel';
+      panel.id='delete-'+s.id;
+      panel.hidden=openDeleteId!==s.id;
+      const warning=document.createElement('p');
+      warning.className='help';
+      warning.textContent='PERMANENT DELETE: World saves, mods, config, whitelist, metadata, and this game container will be removed. There is no undo or automatic backup. Back up any world you might want to keep.';
+      panel.append(warning);
+      const form=document.createElement('form');
+      const label=document.createElement('label');
+      label.textContent='Type "'+s.name+'" to confirm:';
+      const input=document.createElement('input');
+      input.type='text';input.required=true;input.autocomplete='off';
+      input.setAttribute('aria-label','Type server name to confirm deletion');
+      const submit=document.createElement('button');
+      submit.type='submit';submit.className='danger deleteButton';
+      submit.textContent='Permanently Delete Server';submit.disabled=true;
+      input.addEventListener('input',()=>{submit.disabled=busy||input.value!==s.name});
+      form.append(label,input,submit);
+      form.onsubmit=event=>{event.preventDefault();deleteProfile(s)};
+      panel.append(form);
       return panel;
     }
     function actionButton(text,kind,callback,disabled=false){
@@ -328,7 +380,19 @@
         });
         ramBtn.classList.add('ramButton');
         ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
-        box.append(title,details,logs,playersBtn,ramBtn,playerPanel(s),ramPanel(s));area.append(box);
+        box.append(title,details,logs,playersBtn,ramBtn);
+        const deletable=!s.is_active&&['exited','created','not-created'].includes(s.status);
+        if(deletable){
+          const deleteBtn=actionButton('Delete Server','danger',()=>{
+            openDeleteId=openDeleteId===s.id?null:s.id;paint();
+          });
+          deleteBtn.classList.add('deleteButton');
+          deleteBtn.setAttribute('aria-expanded',String(openDeleteId===s.id));
+          box.append(deleteBtn);
+        }
+        box.append(playerPanel(s),ramPanel(s));
+        if(deletable)box.append(deletePanel(s));
+        area.append(box);
       }
     }
     async function refresh(quiet=false){
