@@ -76,6 +76,7 @@ class FakeContainers:
         self.fail_for=set()
         self.fail_once_for=set()
         self.creations=[]
+        self.images=[]
 
     def get(self, name):
         sid=name.removeprefix("mcd-")
@@ -84,6 +85,7 @@ class FakeContainers:
         return self.items[sid]
 
     def create(self, image, **kwargs):
+        self.images.append(image)
         sid=kwargs["name"].removeprefix("mcd-")
         port=kwargs["ports"]["25565/tcp"]
         c=FakeContainer(self,sid,port,fail_start=sid in self.fail_for)
@@ -979,3 +981,134 @@ def test_legacy_forge_numeric_game_mode_and_difficulty_display(environment):
     assert props["difficulty"]=="hard"
     assert props["gamemode"]=="creative"
     assert props["pvp"] is True
+
+
+def test_ftb_evolution_2_profile_is_pinned_offline_and_uses_java25(environment):
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"FTB Evolution 2","ram_gb":"8","players":"TestPlayer, OtherFriend",
+                  "ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+                  "ftb_version_id":"100566","ftb_java_version":"25"})
+    assert response.status_code==200,response.text
+    result=response.json()
+    sid=result["id"]
+    meta=portal.meta_for(sid)
+    assert result["status"]=="not-created"
+    assert meta["mode"]=="ftb"
+    assert meta["ftb_modpack_id"]==135
+    assert meta["ftb_version_id"]==100566
+    assert meta["java_version"]==25
+    assert result["ftb_version_id"]==100566
+    assert result["ftb_modpack_id"]==135
+    assert result["whitelist"]==["TestPlayer","OtherFriend"]
+    assert not environment.containers.creations
+
+    portal.activate(sid)
+    kwargs=environment.containers.creations[-1]
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java25"
+    assert kwargs["environment"]["TYPE"]=="FTBA"
+    assert kwargs["environment"]["FTB_MODPACK_ID"]=="135"
+    assert kwargs["environment"]["FTB_MODPACK_VERSION_ID"]=="100566"
+    assert kwargs["environment"]["MEMORY"]=="8G"
+    assert kwargs["mem_limit"]=="9g"
+    assert "VERSION" not in kwargs["environment"]
+    assert "FTB_FORCE_REINSTALL" not in kwargs["environment"]
+
+    # The pinned version must remain unchanged by ordinary restarts.
+    portal.restart_active(sid)
+    assert environment.containers.images==["itzg/minecraft-server:java25"]
+    assert portal.meta_for(sid)["ftb_version_id"]==100566
+
+
+@pytest.mark.parametrize("url,expected",[
+    ("https://feed-the-beast.com/modpacks/135-ftb-evolution-2",135),
+    ("https://www.feed-the-beast.com/modpacks/135",135),
+    ("https://www.feed-the-beast.com/modpacks/23-ftb-infinity-evolved-17",23),
+])
+def test_parse_ftb_official_modpack_urls(url,expected):
+    assert portal.parse_ftb_url(url)==expected
+
+
+@pytest.mark.parametrize("bad_url",[
+    "http://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+    "https://evil.example/modpacks/135-ftb-evolution-2",
+    "https://www.feed-the-beast.com.evil.example/modpacks/135",
+    "https://feed-the-beast.com@evil.example/modpacks/135",
+    "https://www.feed-the-beast.com/modpacks/135/versions",
+    "https://www.feed-the-beast.com/modpacks/135?next=evil",
+    "https://www.feed-the-beast.com/modpacks/0",
+    "https://www.feed-the-beast.com/other/135",
+    "https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2/../../..",
+])
+def test_invalid_ftb_urls_are_rejected(bad_url):
+    with pytest.raises(ValueError):
+        portal.parse_ftb_url(bad_url)
+
+
+@pytest.mark.parametrize("payload",[
+    {"ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2"},
+    {"ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+     "ftb_version_id":"not-a-number"},
+    {"ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+     "ftb_version_id":"0"},
+    {"ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+     "ftb_version_id":"100566","ftb_java_version":"22"},
+    {"ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+     "ftb_version_id":"100566",
+     "cf_url":"https://www.curseforge.com/minecraft/modpacks/some-pack"},
+    {"ftb_version_id":"100566","cf_url":"https://www.curseforge.com/minecraft/modpacks/some-pack"},
+])
+def test_ftb_invalid_source_version_and_java_rejected_without_profile(environment,payload):
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Invalid FTB","ram_gb":"8","players":"TestPlayer",**payload})
+    assert result.status_code==400,result.text
+    assert not list(portal.ROOT.glob("*/meta.json"))
+    assert not environment.containers.creations
+
+
+def test_ftb_java_selection_for_older_packs(environment):
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Old FTB pack","players":"TestPlayer",
+                  "ftb_url":"https://www.feed-the-beast.com/modpacks/23-ftb-infinity-evolved-17",
+                  "ftb_version_id":"42","ftb_java_version":"8"})
+    assert result.status_code==200,result.text
+    portal.activate(result.json()["id"])
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java8"
+    assert environment.containers.creations[-1]["environment"]["FTB_MODPACK_ID"]=="23"
+
+
+def test_ftb_corrupt_metadata_refuses_switch_and_preserves_meow(environment):
+    meow=install_profile(portal.ROOT,80)
+    portal.activate(meow)
+    sid=install_profile(portal.ROOT,81,valid=False)
+    meta=portal.meta_for(sid)
+    meta.update({"mode":"ftb","java_version":25,"ftb_modpack_id":135,
+                 "ftb_version_id":"invalid"})
+    (portal.ROOT/sid/"meta.json").write_text(json.dumps(meta))
+    with pytest.raises(HTTPException) as e:
+        portal.activate(sid)
+    assert e.value.status_code==409
+    assert environment.containers.items[meow].status=="running"
+    assert portal.active_id()==meow
+    assert len(environment.containers.creations)==1
+
+
+def test_ftb_source_with_world_import_keeps_world_data(environment):
+    archive=io.BytesIO()
+    with zipfile.ZipFile(archive,"w") as z:
+        z.writestr("WorldSave/level.dat",b"imported FTB world")
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"FTB imported","players":"TestPlayer",
+                  "ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+                  "ftb_version_id":"100566","ftb_java_version":"25"},
+            files={"world":("world.zip",archive.getvalue(),"application/zip")})
+    assert result.status_code==200,result.text
+    sid=result.json()["id"]
+    assert (portal.ROOT/sid/"minecraft"/"world"/"level.dat").read_bytes()==b"imported FTB world"
