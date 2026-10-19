@@ -7,6 +7,7 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Install several independent server profiles; **only one can run on the public Minecraft port at a time**.
 - Switch profiles without changing the address friends use to join.
 - Keep each profile's mod files, configs, saves, whitelist and operators on disk.
+- Permanently remove unused inactive servers through an explicit, guarded Delete Server action.
 - Manage Java player access and operator status while the active Minecraft server is ready.
 - Change a server's RAM allocation after installation, independently for each profile.
 - Install from a CurseForge URL, a supported server ZIP, or a Fabric ServerPackCreator package (including a ZIP wrapped inside a ZIP).
@@ -229,8 +230,25 @@ This only downloads the image; it doesn't stop the existing Minecraft server. In
 - **Restart:** restarts the selected running server. It disconnects players.
 - **Refresh:** updates status in the portal.
 - **Logs:** shows recent output from that profile's Docker container. Use this first when the container exits or players cannot connect.
+- **Delete Server:** permanently removes an *inactive, fully stopped* profile, its Docker container and its saved files, after exact-name confirmation. Not available on the selected server.
 
 Players always use the **same Minecraft address and port**; the portal changes which profile is currently serving that address. **Stopped worlds remain on disk.**
+
+### Delete an old server
+
+Under **Installed servers**, find the server you no longer want and choose **Delete Server**. This control is available **only when the profile is not selected** and its Docker game container is fully stopped (or no container was ever created).
+
+**This action is permanent and is intended to reclaim disk space.** It removes the Docker game container and the entire profile directory, including all world saves, mod files, settings, whitelist, operators, and profile metadata. **There is no recycle bin and no automatic backup.**
+
+1. If the unwanted profile is selected, **Make Active** a *different* installed profile first; the portal will stop the old one gracefully. You cannot delete the currently selected profile, even when stopped.
+2. Before deletion, back up anything you might want to keep. The [manual backup procedure](#back-up-your-data-manual-recommended-before-upgrades) below copies the complete profile data root while Minecraft is stopped.
+3. Click **Delete Server** beside the unwanted inactive profile. Read the permanent-loss warning.
+4. **Type the exact server name** shown in the portal. The delete button stays disabled until it matches exactly, including capitalization.
+5. Click **Permanently Delete Server** and accept a final browser confirmation.
+
+The server checks the active selection and current Docker status **again under the deployment lock** before deleting anything. It also requires the authenticated portal token and the exact server name. A running, paused or restarting container is refused; the portal will not stop or delete it on your behalf. If Docker cannot remove the stopped container, the profile data remains intact. If filesystem deletion fails midway, the portal reports an error rather than claiming success: inspect the folder before retrying.
+
+**No other installed server is stopped, deleted, or reconfigured as part of this operation.** Deleting an old server is not the same as stopping a server; stopping always preserves its files.
 
 ### Change RAM after installation
 
@@ -376,7 +394,7 @@ The portal binds TCP **8080** at the configured local IP. Game containers publis
 - Plain HTTP sends the token over the LAN without encryption. For access from outside the trusted network, do not simply forward the portal port; use a properly authenticated/encrypted private access solution instead.
 - The Minecraft game containers intentionally don't set `no-new-privileges` due to the observed image startup failure on Snap Docker. This reduces defense in depth. Use **trusted modpacks**; game mods execute code inside containers.
 - Java 17/21 version detection currently applies to **ServerPackCreator Fabric** packages. Other pack formats may need manual setup or different runtimes.
-- No Minecraft Bedrock/Geyser support, no general Forge/NeoForge installer handling, no automatic backups/restore, no online player list or player kick UI, no profile deletion, and no singleplayer player-UUID reconciliation.
+- No Minecraft Bedrock/Geyser support, no general Forge/NeoForge installer handling, no automatic backups/restore, no online player list or player kick UI, no profile restore after permanent deletion, and no singleplayer player-UUID reconciliation.
 - This is a household prototype, not a hardened multi-tenant hosting panel. Test new worlds/modpacks before placing important saves on it.
 
 ## Development and testing
