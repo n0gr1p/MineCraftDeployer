@@ -12,7 +12,7 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Execute Minecraft server commands in a restricted-to-the-game **Console** panel, displaying command responses.
 - Change common `server.properties` values through GUI toggles, dropdowns, and number inputs.
 - Change a server's RAM allocation after installation, independently for each profile.
-- Install from a CurseForge URL, a supported server ZIP, or a Fabric ServerPackCreator package (including a ZIP wrapped inside a ZIP).
+- Install from a CurseForge URL, **Feed The Beast (FTB) URL and pinned version ID**, or supported server ZIP (including Fabric ServerPackCreator and Dregora).
 
 **This is not a hosting service.** You supply the Linux machine, Docker, storage, and (for remote friends) router configuration. Minecraft Java Edition only.
 
@@ -188,11 +188,42 @@ Click **Install Server**. Uploading creates an **installed/offline profile**; it
 | One outer ZIP containing the supported inner server ZIP | Supported; automatically unwrapped (e.g. Prominence II / Hasturian Era) |
 | CurseForge **client export** (not a dedicated server pack) | Not supported |
 | **RLCraft Dregora** official Forge 1.12.2 server ZIP with its `SERVER README OR DIE.txt` and `mods/` + `config/` | Supported by the specialized Forge 2860 + Java 8 runtime configuration; live verification pending |
+| **FTB modpack URL** with a pinned FTB version ID | Supported through `TYPE=FTBA` and selected Java runtime; live verification pending |
 | Other Forge/NeoForge ServerPackCreator scripts or arbitrary installer scripts | Not supported |
 
 For Fabric ServerPackCreator packages, MineCraftDeployer reads `variables.txt`. It does **not** execute the uploaded `start.sh`, Java installer, or `JAVA_ARGS`: the configured RAM setting takes precedence. A specific CurseForge file/version URL is preferable to a generic modpack page when reproducibility matters.
 
 Server ZIP uploads are limited to **4 GiB compressed**, with limits on the number and expanded size of archive entries. A successfully uploaded profile may still fail during game startup if the mods/versions are incompatible.
+
+### Feed The Beast (FTB) modpack URL — no server ZIP needed
+
+The **FTB app/server installer** can deploy modpacks directly by numeric FTB modpack ID and version ID. The official Minecraft Docker image supports this through `TYPE=FTBA` (the trailing **A** is important), which downloads the FTB installer and the appropriate mod loader without requiring an uploaded server ZIP.
+
+Under **Install a new server**:
+
+1. Enter the server name and allowed player usernames as usual.
+2. Set the Minecraft heap RAM; FTB Evolution 2 recommends **8 GB**.
+3. Paste the modpack URL into **OR Feed The Beast (FTB) modpack URL**. Example: `https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2`.
+4. Enter the **numeric version ID** from the modpack's **Versions** tab. For FTB Evolution 2 v1.4.0, that is **100566**. The modpack ID **135** is automatically extracted from the URL. Version ID is mandatory by design, to prevent the Minecraft world from being unexpectedly upgraded merely by restarting.
+5. Select the **Java version** listed under FTB's modpack Requirements. FTB Evolution 2 (Minecraft 26.1.2 / NeoForge) requires **Java 25**. Older FTB packs might require 21, 17, or 8. Do not pick the Java version by guessing.
+6. Click **Install Server**. The profile is created **offline**, with its requested pack/version saved in the profile metadata. The portal does **not** download the modpack during installation.
+7. Before switching to it, ensure the selected Java runtime image is present on your host (for Evolution 2: `sudo docker pull itzg/minecraft-server:java25`). Docker image pulling on activation is not implemented.
+8. Select the profile and click **Make Active** when it is okay to stop the previous Minecraft server. The Docker runtime will download and install that exact FTB modpack version to its own isolated profile directory. Monitor **Logs** and wait until Minecraft reports it is ready. A running container does not prove the game has finished installing or loading.
+
+For Evolution 2:
+
+| Item | Value |
+| --- | --- |
+| FTB pack ID | `135` |
+| FTB version ID | `100566` (v1.4.0, as of 19 October 2026) |
+| Minecraft | `26.1.2` |
+| Mod loader | NeoForge |
+| Java | `25` |
+| RAM | 8 GB heap recommended, 9 GB container memory limit |
+
+References: [FTB Evolution 2 official page](https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2), [FTB Evolution 2 versions](https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2/versions), and [Minecraft Docker FTBA documentation](https://docker-minecraft-server.readthedocs.io/en/latest/types-and-platforms/mod-platforms/ftb/).
+
+**Important:** Live acceptance is still pending; the automated suite verifies the exact Docker configuration with a fake Docker daemon, not the official FTB installer downloading and booting the full pack. FTB’s external installer and download service must be reachable from your host. This cannot be fully verified before the first activation. Switching to Evolution 2 will disconnect everyone playing on the previously selected Minecraft server.
 
 ### RLCraft Dregora (Minecraft 1.12.2, Forge)
 
