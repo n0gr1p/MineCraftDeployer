@@ -31,7 +31,17 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel,.delete-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
+    .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
+    .setting-field label{margin:0 0 6px;font-size:.9rem}
+    .setting-field select,.setting-field input{width:100%;margin:0}
+    .setting-field input[type=checkbox]{width:auto;height:19px;min-width:19px}
+    .setting-field .toggle-line{display:flex;align-items:center;gap:9px}
+    .setting-field small{display:block;margin-top:6px;line-height:1.35}
+    .setting-field.disabled{opacity:.65}
+    .console-panel input{flex:1;min-width:200px}
+    .console-panel pre{max-height:220px;margin-top:10px}
     .delete-panel{border-color:#bc735c}
     .delete-panel input{max-width:320px}
     .delete-panel button{margin-top:10px}
@@ -112,7 +122,8 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null;
+    const consoleOutputs={};
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
       const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
@@ -126,7 +137,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton')){
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton')){
         const confirmation=btn.closest('.delete-panel')?.querySelector('input');
         btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
       }
@@ -260,6 +271,156 @@
       panel.append(form);
       return panel;
     }
+    const settingFields=[
+      {key:'pvp',label:'Player vs Player (PvP)',type:'bool',hint:'Allow players to damage each other.'},
+      {key:'difficulty',label:'Difficulty',type:'choice',options:['peaceful','easy','normal','hard'],hint:'Changes survival difficulty.'},
+      {key:'gamemode',label:'Default game mode',type:'choice',options:['survival','creative','adventure','spectator'],hint:'Default for new players; does not grant OP/cheats.'},
+      {key:'allow-flight',label:'Allow flight',type:'bool',hint:'Prevents kicks for flying mods or mounts.'},
+      {key:'enable-command-block',label:'Command blocks',type:'bool',hint:'Allows command blocks in the world.'},
+      {key:'spawn-monsters',label:'Spawn hostile mobs',type:'bool',hint:'Enable hostile mob spawning.'},
+      {key:'spawn-animals',label:'Spawn animals',type:'bool',hint:'Enable passive animal spawning.'},
+      {key:'spawn-npcs',label:'Spawn NPCs / villagers',type:'bool',hint:'Enable NPC spawning.'},
+      {key:'allow-nether',label:'Allow Nether',type:'bool',hint:'Enable access to the Nether dimension.'},
+      {key:'max-players',label:'Maximum players',type:'int',min:1,max:100,hint:'Maximum simultaneous players.'},
+      {key:'view-distance',label:'View distance (chunks)',type:'int',min:3,max:16,hint:'Lower values may improve performance, but affect modpacks.'},
+      {key:'spawn-protection',label:'Spawn protection radius',type:'int',min:0,max:128,hint:'0 disables spawn protection.'},
+    ];
+    async function saveSettings(s,changes){
+      if(busy||!Object.keys(changes).length)return;
+      setBusy(true);message('Saving '+s.name+' settings…');
+      try{
+        await request('/servers/'+s.id+'/settings',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({properties:changes})
+        });
+        await refresh(true);
+        message('Settings saved for '+s.name+'. '+(s.status==='running'?
+          'Restart Minecraft when convenient to apply the changes.':
+          'Changes will apply the next time this server starts.'));
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function settingsPanel(s){
+      const panel=document.createElement('div');
+      panel.className='settings-panel';panel.hidden=openSettingsId!==s.id;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Friendly server.properties settings. Changes are saved per server and applied at the next Minecraft start/restart. For commands and cheats, grant trusted players OP in Players; Java dedicated servers have no enable-cheats toggle.';
+      panel.append(help);
+      if(s.settings_pending){
+        const pending=document.createElement('p');
+        pending.className='help';pending.textContent='Settings pending — restart Minecraft when convenient to apply.';
+        panel.append(pending);
+      }
+      const form=document.createElement('form');
+      const grid=document.createElement('div');grid.className='setting-list';
+      const inputs={};
+      for(const cfg of settingFields){
+        const wrapper=document.createElement('div');wrapper.className='setting-field';
+        const locked=(s.locked_properties||[]).includes(cfg.key);
+        if(locked)wrapper.classList.add('disabled');
+        const label=document.createElement('label');
+        label.textContent=cfg.label+(locked?' (modpack locked)':'');
+        const id='setting-'+s.id+'-'+cfg.key;
+        label.htmlFor=id;
+        let input;
+        if(cfg.type==='choice'){
+          input=document.createElement('select');
+          for(const option of cfg.options){
+            const el=document.createElement('option');el.value=option;
+            el.textContent=option[0].toUpperCase()+option.slice(1);input.append(el);
+          }
+          input.value=s.server_properties?.[cfg.key]??cfg.options[0];
+        }else{
+          input=document.createElement('input');
+          if(cfg.type==='bool'){
+            input.type='checkbox';input.checked=!!s.server_properties?.[cfg.key];
+          }else{
+            input.type='number';input.min=cfg.min;input.max=cfg.max;input.step=1;
+            input.value=s.server_properties?.[cfg.key]??cfg.min;
+          }
+        }
+        input.id=id;input.disabled=locked||busy;inputs[cfg.key]=input;
+        if(cfg.type==='bool'){
+          const line=document.createElement('div');line.className='toggle-line';
+          line.append(input,label);wrapper.append(line);
+        }else wrapper.append(label,input);
+        const description=document.createElement('small');
+        description.textContent=locked?'Required for this modpack. '+cfg.hint:cfg.hint;
+        wrapper.append(description);grid.append(wrapper);
+      }
+      form.append(grid);
+      const save=actionButton('Save Settings','secondary',()=>{});
+      save.classList.add('settingsButton');save.type='submit';
+      form.append(save);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const changes={};
+        for(const cfg of settingFields){
+          if((s.locked_properties||[]).includes(cfg.key))continue;
+          const inp=inputs[cfg.key];
+          let value;
+          if(cfg.type==='bool')value=inp.checked;
+          else if(cfg.type==='int'){
+            value=Number(inp.value);
+            if(!Number.isInteger(value)||value<cfg.min||value>cfg.max){
+              message(cfg.label+' must be between '+cfg.min+' and '+cfg.max);return;
+            }
+          }else value=inp.value;
+          if(value!==s.server_properties?.[cfg.key])changes[cfg.key]=value;
+        }
+        if(!Object.keys(changes).length){message('No server settings changed.');return}
+        saveSettings(s,changes);
+      };
+      panel.append(form);
+      return panel;
+    }
+    async function sendConsole(s,command){
+      if(busy)return;
+      setBusy(true);message('Executing Minecraft command…');
+      try{
+        const result=await request('/servers/'+s.id+'/console',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({command})
+        });
+        consoleOutputs[s.id]=(consoleOutputs[s.id]||'')+'> '+result.command+'\n'+
+          (result.output||'(No text returned by Minecraft)')+'\n\n';
+        consoleOutputs[s.id]=consoleOutputs[s.id].slice(-8000);
+        message('Command sent. See the output in Console.');
+        await refresh(true);
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function consolePanel(s){
+      const panel=document.createElement('div');
+      panel.className='console-panel';panel.hidden=openConsoleId!==s.id;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Minecraft game commands only (for example: list, say Hello, time query daytime). These have full Minecraft administrator privileges and can change the world. They are NOT Linux shell commands.';
+      panel.append(help);
+      if(!s.is_active||s.status!=='running'||!s.player_controls_ready){
+        const msg=document.createElement('p');msg.className='help';
+        msg.textContent='Select and start this Minecraft server with RCON enabled to use its console. Older profiles may require Enable Players first.';
+        panel.append(msg);return panel;
+      }
+      const form=document.createElement('form');form.className='row';
+      const input=document.createElement('input');input.maxLength=256;input.required=true;
+      input.placeholder='list';input.setAttribute('aria-label','Minecraft console command');
+      const submit=actionButton('Execute','secondary',()=>{});submit.type='submit';
+      submit.classList.add('consoleButton');
+      form.append(input,submit);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const value=input.value.trim();
+        if(!value||/[\r\n\x00-\x1f\x7f]/.test(value)){
+          message('Enter a single Minecraft command, without newlines.');return;
+        }
+        sendConsole(s,value);
+      };
+      panel.append(form);
+      const out=document.createElement('pre');
+      out.textContent=consoleOutputs[s.id]||'Minecraft responses will appear here.';
+      panel.append(out);
+      return panel;
+    }
     function actionButton(text,kind,callback,disabled=false){
       const btn=document.createElement('button');
       btn.className=(kind||'secondary')+' playerButton';
@@ -384,6 +545,18 @@
         ramBtn.classList.add('ramButton');
         ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
         box.append(title,details,logs,playersBtn,ramBtn);
+        const settingsBtn=actionButton('Settings','secondary',()=>{
+          openSettingsId=openSettingsId===s.id?null:s.id;paint();
+        });
+        settingsBtn.classList.add('settingsButton');
+        settingsBtn.setAttribute('aria-expanded',String(openSettingsId===s.id));
+        box.append(settingsBtn);
+        const consoleBtn=actionButton('Console','secondary',()=>{
+          openConsoleId=openConsoleId===s.id?null:s.id;paint();
+        });
+        consoleBtn.classList.add('consoleButton');
+        consoleBtn.setAttribute('aria-expanded',String(openConsoleId===s.id));
+        box.append(consoleBtn);
         const deletable=!s.is_active&&['exited','created','not-created'].includes(s.status);
         if(deletable){
           const deleteBtn=actionButton('Delete Server','danger',()=>{
@@ -393,7 +566,7 @@
           deleteBtn.setAttribute('aria-expanded',String(openDeleteId===s.id));
           box.append(deleteBtn);
         }
-        box.append(playerPanel(s),ramPanel(s));
+        box.append(playerPanel(s),ramPanel(s),settingsPanel(s),consolePanel(s));
         if(deletable)box.append(deletePanel(s));
         area.append(box);
       }
