@@ -374,6 +374,55 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
 
+class DeleteServerConfirmation(BaseModel):
+    confirm_name:str
+    confirm_word:Literal["DELETE"]
+
+
+@app.post("/api/servers/{sid}/delete")
+def delete_server(sid:str,confirmation:DeleteServerConfirmation,
+                  authorization:str|None=Header(None)):
+    auth(authorization)
+    with deployment_lock():
+        # Deleted data includes world saves, packs and settings; never act on
+        # a running or selected profile, even if that selected game is stopped.
+        directory=path_for(sid)
+        if directory.is_symlink() or directory.resolve().parent!=ROOT.resolve():
+            raise HTTPException(409,"Unsafe profile path; refusing deletion")
+        meta=meta_for(sid)
+        if meta.get("id")!=sid:
+            raise HTTPException(409,"Profile ID does not match its directory")
+        if confirmation.confirm_name!=meta["name"]:
+            raise HTTPException(400,"Type the server name exactly to confirm permanent deletion")
+        if active_id()==sid:
+            raise HTTPException(409,"Cannot delete the selected server. Make another server active first")
+
+        try:
+            c=container_for(sid)
+            if c:
+                c.reload()
+                if c.status not in ("created","exited"):
+                    raise HTTPException(409,
+                        "The server container must be fully stopped before deletion")
+                # Do not remove any volumes here. Profile data is handled only
+                # after Docker confirms the container removal succeeded.
+                c.remove()
+        except docker.errors.DockerException as exc:
+            raise HTTPException(409,
+                f"Could not remove the stopped game container; profile files preserved: {exc}") from exc
+
+        try:
+            # This is deliberately permanent. A failed filesystem removal may
+            # leave a partial profile, which can be inspected/retried; never
+            # report success unless the complete folder is gone.
+            shutil.rmtree(directory)
+        except OSError as exc:
+            raise HTTPException(409,
+                f"Game container removed, but deleting profile files failed: {exc}. Check the server data folder before retrying.") from exc
+
+        return {"deleted":True,"id":sid,"name":meta["name"]}
+
+
 class RamChange(BaseModel):
     ram_gb:int=Field(ge=2)
     restart_running:bool=False
