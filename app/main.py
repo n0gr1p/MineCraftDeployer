@@ -120,6 +120,10 @@ def check_launch(meta):
             staged.replace(metadata)
     if meta["mode"]=="fabric" and not (path_for(meta["id"])/"minecraft"/"variables.txt").is_file():
         raise HTTPException(409,"Fabric pack metadata is missing")
+    if meta["mode"]=="forge":
+        data=path_for(meta["id"])/"minecraft"
+        if meta.get("pack_format")!="rlcraft-dregora" or meta.get("minecraft_version")!="1.12.2" or meta.get("loader_version")!="14.23.5.2860" or not (data/"SERVER README OR DIE.txt").is_file() or not (data/"mods").is_dir() or not (data/"config").is_dir():
+            raise HTTPException(409,"The installed Dregora Forge server pack is missing or incompatible; activation cancelled")
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
@@ -172,6 +176,17 @@ def get_or_create_container(meta):
         env.update({"TYPE":"FABRIC",
                     "VERSION":meta["minecraft_version"],
                     "FABRIC_LOADER_VERSION":meta["loader_version"]})
+    elif meta["mode"]=="forge":
+        # Dregora v1.1.2b requirements from its bundled server README.
+        # TYPE=FORGE installs Forge without executing untrusted pack scripts.
+        env.update({
+            "TYPE":"FORGE", "VERSION":meta["minecraft_version"],
+            "FORGE_VERSION":meta["loader_version"],
+            "LEVEL":"DregoraRL", "LEVEL_TYPE":"OTG",
+            "ALLOW_FLIGHT":"TRUE", "DIFFICULTY":"hard",
+            "MAX_TICK_TIME":"-1", "ENABLE_COMMAND_BLOCK":"TRUE",
+            "VIEW_DISTANCE":"10",
+        })
     elif meta["mode"]=="zip":
         env.update({"TYPE":"CUSTOM","CUSTOM_SERVER":"/data/server.jar"})
     else:
@@ -349,7 +364,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             archive.unlink()
             candidates=list((root/"import").rglob("level.dat"))
             if len(candidates)!=1: raise ValueError("World ZIP must contain exactly one level.dat")
-            shutil.copytree(candidates[0].parent,data/"world",dirs_exist_ok=True)
+            shutil.copytree(candidates[0].parent,data/(detected.get("world_name","world") if pack else "world"),dirs_exist_ok=True)
             shutil.rmtree(root/"import")
         meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist,"ops":[]}
         if pack: meta.update(detected)
