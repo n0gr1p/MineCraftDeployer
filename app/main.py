@@ -330,7 +330,8 @@ def get_or_create_container(meta):
         f"itzg/minecraft-server:java{java_version}",name="mcd-"+sid,environment=env,
         volumes={str(path_for(sid)/"minecraft"):{"bind":"/data","mode":"rw"}},
         ports={"25565/tcp":GAME_PORT},mem_limit=f'{meta["ram_gb"]+1}g',
-        nano_cpus=400000000,restart_policy={"Name":"no"})
+        # No CPU quota or affinity: Docker shares all host CPUs with Minecraft.
+        restart_policy={"Name":"no"})
 
 def activate(sid):
     # The lock covers the entire stop -> start transition, including rollback.
