@@ -47,6 +47,11 @@ class FakeContainer:
         assert timeout>=45
         self.status="exited"
 
+    def restart(self, timeout):
+        assert timeout>=45
+        assert self.status=="running"
+        self.status="running"
+
     def remove(self):
         assert self.status!="running"
         del self.owner.items[self.sid]
