@@ -4,6 +4,9 @@ import os
 import tempfile
 import io
 import zipfile
+import hashlib
+import tarfile
+from pathlib import Path
 
 import docker
 import pytest
@@ -15,6 +18,7 @@ os.environ.setdefault("MCD_TOKEN", "test-secret-" + "a" * 40)
 os.environ.setdefault("MCD_DATA", tempfile.mkdtemp(prefix="minecraft-deployer-test-"))
 
 from app import main as portal
+from app import backups
 
 
 class FakeContainer:
@@ -1117,3 +1121,112 @@ def test_ftb_source_with_world_import_keeps_world_data(environment):
     assert result.status_code==200,result.text
     sid=result.json()["id"]
     assert (portal.ROOT/sid/"minecraft"/"world"/"level.dat").read_bytes()==b"imported FTB world"
+
+
+@pytest.fixture
+def backup_drive(tmp_path,monkeypatch):
+    disk=tmp_path/"backup-disk"
+    disk.mkdir()
+    monkeypatch.setattr(backups,"BACKUP_ROOT",disk)
+    monkeypatch.setattr(backups,"BACKUP_HOST_DIR","/home/peter/bulk-storage/minecraft-backups")
+    monkeypatch.setattr(backups,"BACKUP_VOLUME_UUID","c3eac39c-a160-4a6d-b816-6c6e599224e8")
+    original=Path.is_mount
+    monkeypatch.setattr(Path,"is_mount",lambda p: p==disk or original(p))
+    (disk/backups.MARKER).write_text(backups.BACKUP_VOLUME_UUID+"\\n")
+    return disk
+
+
+def test_offline_backup_preserves_data_and_creates_sha256_manifest(environment,backup_drive):
+    sid=install_profile(portal.ROOT,90)
+    directory=portal.ROOT/sid/"minecraft"
+    (directory/"world").mkdir()
+    (directory/"world"/"level.dat").write_bytes(b"precious world data")
+    (directory/"server.properties").write_text("pvp=false\\n")
+    with TestClient(portal.app) as http:
+        path="/api/servers/"+sid+"/backups"
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        assert http.get(path).status_code==401
+        assert http.post(path).status_code==401
+        result=http.post(path,headers=auth)
+        assert result.status_code==200,result.text
+        data=result.json()
+        backups_list=http.get(path,headers=auth)
+        assert backups_list.status_code==200,backups_list.text
+        assert len(backups_list.json())==1
+    archive=backup_drive/sid/data["filename"]
+    assert archive.is_file()
+    assert data["size_bytes"]==archive.stat().st_size
+    assert hashlib.sha256(archive.read_bytes()).hexdigest()==data["sha256"]
+    manifest=archive.with_suffix(".json")
+    assert json.loads(manifest.read_text())["server_id"]==sid
+    with tarfile.open(archive) as tar:
+        assert tar.extractfile("minecraft/world/level.dat").read()==b"precious world data"
+        assert tar.extractfile("minecraft/server.properties").read()==b"pvp=false\\n"
+        assert json.loads(tar.extractfile("meta.json").read())["id"]==sid
+    assert (directory/"world"/"level.dat").read_bytes()==b"precious world data"
+
+
+def test_running_server_backup_refused_without_pausing_world(environment,backup_drive):
+    sid=install_profile(portal.ROOT,91)
+    portal.activate(sid)
+    c=environment.containers.items[sid]
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers/"+sid+"/backups",headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert result.status_code==409
+    assert "Stop" in result.json()["detail"]
+    assert c.status=="running"
+    assert not c.commands
+    assert not (backup_drive/sid).exists()
+
+
+def test_missing_backup_marker_never_creates_root_disk_backup(environment,backup_drive):
+    sid=install_profile(portal.ROOT,92)
+    (backup_drive/backups.MARKER).unlink()
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers/"+sid+"/backups",headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert result.status_code==409
+    assert "marker missing" in result.json()["detail"]
+    assert not (backup_drive/sid).exists()
+
+
+def test_backup_rejected_when_mount_missing_even_with_spoofed_marker(environment,backup_drive,monkeypatch):
+    sid=install_profile(portal.ROOT,93)
+    monkeypatch.setattr(Path,"is_mount",lambda p: False)
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers/"+sid+"/backups",headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert result.status_code==409
+    assert "bind mount" in result.json()["detail"]
+    assert not (backup_drive/sid).exists()
+
+
+def test_bad_backup_uuid_marker_refused_and_existing_snapshots_never_deleted(environment,backup_drive):
+    sid=install_profile(portal.ROOT,94)
+    (backup_drive/backups.MARKER).write_text("00000000-0000-0000-0000-000000000000")
+    folder=backup_drive/sid
+    folder.mkdir()
+    precious=folder/"backup-20261019T000000Z-12345678.tar"
+    precious.write_bytes(b"previous snapshot")
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers/"+sid+"/backups",headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert result.status_code==409
+    assert "mismatch" in result.json()["detail"]
+    assert precious.read_bytes()==b"previous snapshot"
+
+
+def test_backup_survives_permanent_deletion_of_stopped_profile(environment,backup_drive):
+    current=install_profile(portal.ROOT,95)
+    target=install_profile(portal.ROOT,96)
+    portal.activate(current)
+    with TestClient(portal.app) as http:
+        headers={"Authorization":"Bearer "+portal.TOKEN}
+        backed=http.post("/api/servers/"+target+"/backups",headers=headers)
+        assert backed.status_code==200,backed.text
+        file=backup_drive/target/backed.json()["filename"]
+        assert file.is_file()
+        result=http.post("/api/servers/"+target+"/delete",headers=headers,
+                         json={"confirm_name":"Pack 96","confirm_word":"DELETE"})
+        assert result.status_code==200,result.text
+    assert not (portal.ROOT/target).exists()
+    assert file.exists()
+    assert portal.active_id()==current
+    assert environment.containers.items[current].status=="running"
