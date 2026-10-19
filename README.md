@@ -8,6 +8,7 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Switch profiles without changing the address friends use to join.
 - Keep each profile's mod files, configs, saves, whitelist and operators on disk.
 - Permanently remove unused inactive servers through an explicit, guarded Delete Server action.
+- Create and list consistent **offline** profile backups on a separately mounted disk, with an identity marker and SHA256 manifest.
 - Manage Java player access and operator status while the active Minecraft server is ready.
 - Execute Minecraft server commands in a restricted-to-the-game **Console** panel, displaying command responses.
 - Change common `server.properties` values through GUI toggles, dropdowns, and number inputs.
@@ -390,6 +391,33 @@ The first command updates checked-out code; the second rebuilds/restarts the **p
 
 Review changes before pulling if you have made local edits. Keep your `.env`: it's local configuration and shouldn't be replaced by an example file.
 
+### Per-server offline backups (portal)
+
+The **Backups** panel creates and lists complete backups of a *stopped* Minecraft server. It includes `minecraft/` (worlds, mods, configs) and `meta.json`. Archives are uncompressed `.tar` files with SHA256 manifests, stored outside the Minecraft data directory. The archive is not deleted when the server profile is permanently deleted.
+
+**Set up a separately mounted backup drive before enabling the feature:**
+
+1. Mount the backup disk first and check it with `findmnt` or `mountpoint`. For the home server, the ext4 volume is mounted at `/home/peter/bulk-storage` with UUID `c3eac39c-a160-4a6d-b816-6c6e599224e8`. The backup folder is `/home/peter/bulk-storage/minecraft-backups`.
+2. While the actual drive is confirmed mounted, create its identity marker *inside the backup folder* (not in `~` or under `MCD_HOST_DATA`):
+
+   ```bash
+   printf '%s\\n' 'c3eac39c-a160-4a6d-b816-6c6e599224e8' > /home/peter/bulk-storage/minecraft-backups/.minecraftdeployer-volume-uuid
+   ```
+
+3. In the existing local `.env`, set:
+
+   ```dotenv
+   MCD_BACKUP_HOST_DIR=/home/peter/bulk-storage/minecraft-backups
+   MCD_BACKUP_VOLUME_UUID=c3eac39c-a160-4a6d-b816-6c6e599224e8
+   ```
+
+4. Rebuild **only the portal** using `sudo docker compose up -d --build`. Check `sudo docker compose config -q` first. The Compose bind mount exposes that folder as `/backups` inside the portal container.
+5. Stop the Minecraft server you want to back up, wait for Docker to report `exited`, and open its **Backups** panel. Click **Create Offline Backup**. Do not start, delete, or modify that server while the snapshot runs. Its snapshot will be listed with a timestamp, size, and abbreviated checksum afterward.
+
+**Safety:** The backup API requires authentication, enforces the global deployment lock, and refuses running/restarting/paused game containers. The destination must be an actual Docker bind mount, configured via both variables, with a plain identity marker matching the expected UUID. A missing drive/marker fails closed; the portal does **not** create a backup directory on the system SSD as a fallback. Unfinished `.partial` files are discarded. No automatic deletion/retention is performed. Backups may include sensitive modpack configuration; keep the backup disk and portal access protected.
+
+**Current limitations:** This is the first offline-only backup slice; **automatic scheduling, live RCON save-coordination, restore operations, and full live acceptance testing are pending**. It does not pause or interrupt a running Minecraft server to make a backup. Backups do not include your separate `.env` file, and the marker verifies your configuration, not a cryptographically authenticated physical disk.
+
 ### Back up your data (manual; recommended before upgrades)
 
 **Automatic backups are not implemented.** For a consistent world backup, first use the portal's **Stop** button on the active server and wait for it to exit. Then, from the repo directory:
@@ -453,6 +481,8 @@ When asking for help, share the **error message and relevant logs**, but **redac
 | `MCD_PUBLIC_HOST` | IP/DNS displayed as the game's join address | Your LAN address for initial tests, public DNS for outside friends |
 | `MCD_MAX_RAM_GB` | Maximum heap size selectable when creating **or editing** a server's RAM | `12` |
 | `CF_API_KEY` | Optional CurseForge API key for CurseForge URL imports | Empty |
+| `MCD_BACKUP_HOST_DIR` | Optional absolute path to separately mounted backup folder on Linux host; disabled by default | `/home/peter/bulk-storage/minecraft-backups` |
+| `MCD_BACKUP_VOLUME_UUID` | Required expected ext4 UUID marker for backup destination; disabled by default | `c3eac39c-a160-4a6d-b816-6c6e599224e8` |
 
 The portal binds TCP **8080** at the configured local IP. Game containers publish the chosen Minecraft port. Changing server ports or runtime security policies can cause the portal to replace old Docker game containers on their next activation, preserving data in `MCD_HOST_DATA`.
 
@@ -463,7 +493,7 @@ The portal binds TCP **8080** at the configured local IP. Game containers publis
 - Plain HTTP sends the token over the LAN without encryption. For access from outside the trusted network, do not simply forward the portal port; use a properly authenticated/encrypted private access solution instead.
 - The Minecraft game containers intentionally don't set `no-new-privileges` due to the observed image startup failure on Snap Docker. This reduces defense in depth. Use **trusted modpacks**; game mods execute code inside containers.
 - Java 17/21 version detection currently applies to **ServerPackCreator Fabric** packages. Other pack formats may need manual setup or different runtimes.
-- No Minecraft Bedrock/Geyser support, no general Forge/NeoForge installer handling, no automatic backups/restore, no online player list or player kick UI, no profile restore after permanent deletion, and no singleplayer player-UUID reconciliation.
+- No Minecraft Bedrock/Geyser support, no general Forge/NeoForge installer handling, no automatic scheduled/live backups or restore, no online player list or player kick UI, no profile restore after permanent deletion, and no singleplayer player-UUID reconciliation.
 - This is a household prototype, not a hardened multi-tenant hosting panel. Test new worlds/modpacks before placing important saves on it.
 
 ## Development and testing
