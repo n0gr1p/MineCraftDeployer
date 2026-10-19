@@ -184,11 +184,42 @@ Click **Install Server**. Uploading creates an **installed/offline profile**; it
 | Fabric ServerPackCreator `variables.txt`, with Minecraft version, Fabric loader version, and recommended Java 17 or 21 | Supported; the Docker image installs the Fabric runtime |
 | One outer ZIP containing the supported inner server ZIP | Supported; automatically unwrapped (e.g. Prominence II / Hasturian Era) |
 | CurseForge **client export** (not a dedicated server pack) | Not supported |
-| Forge/NeoForge ServerPackCreator scripts or arbitrary installer scripts | Not supported |
+| **RLCraft Dregora** official Forge 1.12.2 server ZIP with its `SERVER README OR DIE.txt` and `mods/` + `config/` | Supported by the specialized Forge 2860 + Java 8 runtime configuration; live verification pending |
+| Other Forge/NeoForge ServerPackCreator scripts or arbitrary installer scripts | Not supported |
 
 For Fabric ServerPackCreator packages, MineCraftDeployer reads `variables.txt`. It does **not** execute the uploaded `start.sh`, Java installer, or `JAVA_ARGS`: the configured RAM setting takes precedence. A specific CurseForge file/version URL is preferable to a generic modpack page when reproducibility matters.
 
 Server ZIP uploads are limited to **4 GiB compressed**, with limits on the number and expanded size of archive entries. A successfully uploaded profile may still fail during game startup if the mods/versions are incompatible.
+
+### RLCraft Dregora (Minecraft 1.12.2, Forge)
+
+For **RLCraft Dregora v1.1.2b**, select its dedicated **server pack** ZIP (not the smaller CurseForge client export) in the **OR ready-to-run server ZIP** upload field. The specific server pack is [CurseForge file 7285709](https://www.curseforge.com/minecraft/modpacks/rlcraft-dregora/files/7285709).
+
+The Dregora server ZIP has no standalone `server.jar`: its bundled `SERVER README OR DIE.txt` instructs administrators to install **Forge 1.12.2-14.23.5.2860 with Java 8**. MineCraftDeployer now recognizes this exact pack layout from its README plus `mods/` and `config/`. It launches the official Minecraft Docker image in Forge mode instead of running any scripts supplied inside the upload. It supports the regular root layout and one enclosing directory.
+
+**Critical world-generation settings** are set through Docker's `server.properties` environment variables:
+
+| Property | Configured value | Reason |
+| --- | --- | --- |
+| `level-name` | `DregoraRL` | Required for the Dregora world |
+| `level-type` | `OTG` | Uses OpenTerrainGenerator |
+| `allow-flight` | `true` | Supports flying mounts/abilities |
+| `difficulty` | `hard` | The pack's intended balance |
+| `max-tick-time` | `-1` | Prevents Forge watchdog shutdown during long OTG world generation |
+| `enable-command-block` | `true` | Required for some structure/villager spawning |
+| `view-distance` | `10` | Intended compatibility (lower values can interfere with mob spawning) |
+
+**Never change `level-name` or `level-type` after world creation.** In this release, these are fixed specifically for Dregora profiles, not user-editable. An optional world ZIP is extracted under `DregoraRL/`; only import a world that is actually compatible with this Dregora generation setup.
+
+The pack author warns that the **first startup appears frozen** and should be given time to finish. `max-tick-time=-1` disables Minecraft's automatic stalled-tick watchdog, so watch logs and resource usage rather than assuming `running` means healthy. The author recommends **about 8 GB of server RAM**. If you choose to pre-generate terrain for a large group, follow the bundled README and make a backup first; large-scale 20,000-block-radius pre-generation is **not** automatic.
+
+**Before activating Dregora for the first time**, ensure the Java 8 game image is available on the Docker host:
+
+```bash
+sudo docker pull itzg/minecraft-server:java8
+```
+
+This only downloads the image; it doesn't stop the existing Minecraft server. Initial Forge installation may also download Forge libraries at runtime. **Live acceptance with the actual 644.8 MB ZIP is still pending**; tests use minimal simulated server packs and a fake Docker daemon.
 
 ### Select, start, stop, restart, and inspect logs
 
@@ -310,7 +341,7 @@ Always inspect logs and preserve the data directory before deleting or recreatin
 | `mkdir ... /srv ... read-only file system` or Docker cannot mount `/srv` | Snap Docker confinement may prevent host-path mounts. Choose a writable folder under your Linux home directory, update `MCD_HOST_DATA`, and recreate **the portal only** with Compose. |
 | Portal opens only from the Linux host | `MCD_PORTAL_BIND_IP` probably points to `127.0.0.1`. Set the Linux LAN IP, run Compose again, and check the host firewall. Never expose 8080 to the internet. |
 | Portal says `Unauthorized` | Connect using the value of `MCD_TOKEN` from your local `.env`, not the sample placeholder. Never paste this token into public messages. |
-| `No such image: itzg/minecraft-server:java17` | The Docker daemon has not downloaded that runtime image. Run `sudo docker pull itzg/minecraft-server:java17`, then retry **Make Active**. Java 21 packs may analogously need the Java 21 image. Automatic image pulling on activation is not yet implemented. |
+| `No such image: itzg/minecraft-server:java17` or `java8` | The Docker daemon has not downloaded the selected runtime image. Run `sudo docker pull itzg/minecraft-server:java17` for Fabric/Java 17 or `sudo docker pull itzg/minecraft-server:java8` for Dregora, then retry **Make Active**. Automatic image pulling on activation is not yet implemented. |
 | `exec /image/scripts/start: operation not permitted` | Early prototype containers included `no-new-privileges`, which caused this exact error under Snap Docker. Update the portal; its next **Start/Make Active** can replace the obsolete container while preserving the bind-mounted data. Don't recursively change permissions on game files. |
 | `This ZIP does not contain a top-level server.jar` | Older portal builds required a ready-to-run JAR. Update to a build supporting Fabric ServerPackCreator and the nested-ZIP wrapper. If it still rejects the pack, it may use an unsupported installer format. |
 | Minecraft container says `running` but players cannot join | Minecraft may still be downloading/installing Fabric or loading mods. Open **Logs** and wait for its ready message. Also check server errors, whitelist, LAN connectivity and port forwarding. |
