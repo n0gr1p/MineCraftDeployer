@@ -401,7 +401,7 @@ The **Backups** panel creates and lists complete backups of a *stopped* Minecraf
 2. While the actual drive is confirmed mounted, create its identity marker *inside the backup folder* (not in `~` or under `MCD_HOST_DATA`):
 
    ```bash
-   printf '%s\\n' 'c3eac39c-a160-4a6d-b816-6c6e599224e8' > /home/peter/bulk-storage/minecraft-backups/.minecraftdeployer-volume-uuid
+   printf '%s' 'c3eac39c-a160-4a6d-b816-6c6e599224e8' > /home/peter/bulk-storage/minecraft-backups/.minecraftdeployer-volume-uuid
    ```
 
 3. In the existing local `.env`, set:
