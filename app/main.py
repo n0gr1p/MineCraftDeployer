@@ -206,6 +206,22 @@ def read_properties(meta):
     return values
 
 
+_FTB_MODPACK_PATH=re.compile(r"/modpacks/([1-9][0-9]{0,9})(?:-[a-z0-9-]+)?/?")
+_FTB_VERSIONS={8,17,21,25}
+
+
+def parse_ftb_url(value):
+    # Only an official FTB web URL is accepted; never fetch arbitrary user URLs.
+    url=urlparse(value)
+    if (url.scheme!="https" or url.netloc not in ("feed-the-beast.com","www.feed-the-beast.com")
+            or url.username or url.password or url.query or url.fragment):
+        raise ValueError("Use an HTTPS FTB modpack URL from feed-the-beast.com")
+    match=_FTB_MODPACK_PATH.fullmatch(url.path)
+    if not match:
+        raise ValueError("FTB URL must look like https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2")
+    return int(match.group(1))
+
+
 def check_launch(meta):
     # An older portal version accepted an outer ZIP without preparing its contents.
     # Repair its profile on first activation, before stopping any running game.
@@ -223,6 +239,11 @@ def check_launch(meta):
             staged.replace(metadata)
     if meta["mode"]=="fabric" and not (path_for(meta["id"])/"minecraft"/"variables.txt").is_file():
         raise HTTPException(409,"Fabric pack metadata is missing")
+    if meta["mode"]=="ftb":
+        if (not isinstance(meta.get("ftb_modpack_id"),int) or meta["ftb_modpack_id"]<1
+                or not isinstance(meta.get("ftb_version_id"),int) or meta["ftb_version_id"]<1
+                or meta.get("java_version") not in _FTB_VERSIONS):
+            raise HTTPException(409,"Invalid FTB profile metadata; activation cancelled before stopping the selected server")
     if meta["mode"]=="forge":
         data=path_for(meta["id"])/"minecraft"
         if meta.get("pack_format")!="rlcraft-dregora" or meta.get("minecraft_version")!="1.12.2" or meta.get("loader_version")!="14.23.5.2860" or not (data/"SERVER README OR DIE.txt").is_file() or not (data/"mods").is_dir() or not (data/"config").is_dir():
@@ -272,7 +293,13 @@ def get_or_create_container(meta):
         env["ENABLE_WHITELIST"]="FALSE"
     ops=meta.get("ops",[])
     if ops: env["OPS"]=",".join(ops)
-    if meta["mode"]=="curseforge":
+    if meta["mode"]=="ftb":
+        # FTBA fetches official FTB installers and installs the mod loader;
+        # the pinned version prevents surprise modpack upgrades on restart.
+        env.update({"TYPE":"FTBA",
+                    "FTB_MODPACK_ID":str(meta["ftb_modpack_id"]),
+                    "FTB_MODPACK_VERSION_ID":str(meta["ftb_version_id"])})
+    elif meta["mode"]=="curseforge":
         env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"]})
         if CF_KEY: env["CF_API_KEY"]=CF_KEY
     elif meta["mode"]=="fabric":
@@ -438,6 +465,8 @@ def state(meta):
             "minecraft_version":meta.get("minecraft_version"),
             "loader_version":meta.get("loader_version"),
             "java_version":meta.get("java_version",21),
+            "ftb_modpack_id":meta.get("ftb_modpack_id"),
+            "ftb_version_id":meta.get("ftb_version_id"),
             "address":f"{HOST}:{GAME_PORT}"}
 
 @app.get("/")
@@ -449,11 +478,23 @@ def list_servers(authorization:str|None=Header(None)):
     return [state(json.loads((p/"meta.json").read_text())) for p in ROOT.iterdir() if (p/"meta.json").is_file()]
 
 @app.post("/api/servers")
-async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(...),cf_url:str=Form(""),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
+async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(...),cf_url:str=Form(""),ftb_url:str=Form(""),ftb_version_id:str=Form(""),ftb_java_version:int=Form(25),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
     auth(authorization)
     if not re.fullmatch("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}",name): raise HTTPException(400,"Invalid server name")
     if not 2<=ram_gb<=MAX_RAM: raise HTTPException(400,"Invalid RAM allocation")
-    if bool(cf_url)==bool(pack): raise HTTPException(400,"Supply exactly one CurseForge URL or server ZIP")
+    if sum((bool(cf_url),bool(ftb_url),bool(pack)))!=1:
+        raise HTTPException(400,"Provide exactly one installation source: CurseForge URL, FTB URL, or server ZIP")
+    if ftb_url:
+        try:
+            ftb_pack_id=parse_ftb_url(ftb_url)
+        except ValueError as exc:
+            raise HTTPException(400,str(exc)) from exc
+        if not re.fullmatch(r"[1-9][0-9]{0,9}",ftb_version_id):
+            raise HTTPException(400,"FTB version ID is required; copy its numeric ID from the pack's Versions tab")
+        if ftb_java_version not in _FTB_VERSIONS:
+            raise HTTPException(400,"FTB Java version must be 8, 17, 21, or 25 (Evolution 2 requires 25)")
+    elif ftb_version_id:
+        raise HTTPException(400,"An FTB version ID requires an FTB modpack URL")
     whitelist=[p.strip() for p in re.split(r"[,\s]+",players) if p.strip()]
     if not whitelist or len(whitelist)>50 or any(not re.fullmatch(r"[A-Za-z0-9_]{3,16}",p) for p in whitelist):
         raise HTTPException(400,"Enter 1-50 valid Minecraft Java usernames (3-16 letters, numbers, underscores)")
@@ -483,7 +524,13 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             if len(candidates)!=1: raise ValueError("World ZIP must contain exactly one level.dat")
             shutil.copytree(candidates[0].parent,data/(detected.get("world_name","world") if pack else "world"),dirs_exist_ok=True)
             shutil.rmtree(root/"import")
-        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,"mode":"curseforge" if cf_url else "zip","whitelist":whitelist,"ops":[]}
+        meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,
+              "mode":"ftb" if ftb_url else ("curseforge" if cf_url else "zip"),
+              "whitelist":whitelist,"ops":[]}
+        if ftb_url:
+            meta.update({"ftb_url":ftb_url,"ftb_modpack_id":ftb_pack_id,
+                         "ftb_version_id":int(ftb_version_id),
+                         "java_version":ftb_java_version})
         if pack: meta.update(detected)
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
