@@ -103,13 +103,29 @@
         <p class="muted help">Required for the internet-accessible game. Comma-separated Minecraft Java usernames (not Xbox gamertags).</p>
         <label for="ram">RAM (GB)</label>
         <input id="ram" name="ram_gb" type="number" min="2" max="12" value="6">
+        <p class="muted help">Choose <strong>one</strong> source: CurseForge URL, FTB URL, or server ZIP.</p>
         <label for="cfUrl">CurseForge modpack URL</label>
-        <input id="cfUrl" name="cf_url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
+        <input id="cfUrl" name="cf_url" type="url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
+        <label for="ftbUrl">OR Feed The Beast (FTB) modpack URL</label>
+        <input id="ftbUrl" name="ftb_url" type="url" placeholder="https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2">
+        <div id="ftbOptions" hidden>
+          <label for="ftbVersion">FTB version ID (required; pins the modpack)</label>
+          <input id="ftbVersion" name="ftb_version_id" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="100566 (Evolution 2 v1.4.0)">
+          <p class="muted help">Get the numeric ID from the FTB modpack's Versions tab, e.g. 100566 for Evolution 2 v1.4.0. Pinning avoids unintended upgrades when restarting Minecraft.</p>
+          <label for="ftbJava">Java runtime required by the modpack</label>
+          <select id="ftbJava" name="ftb_java_version">
+            <option value="25" selected>Java 25 — FTB Evolution 2</option>
+            <option value="21">Java 21</option>
+            <option value="17">Java 17</option>
+            <option value="8">Java 8 — older FTB packs</option>
+          </select>
+          <p class="muted help">FTB lists the required Java version under Requirements on the modpack page. Minecraft runs in Docker; no Java installation on Ubuntu needed.</p>
+        </div>
         <label for="pack">OR ready-to-run server ZIP</label>
         <input id="pack" name="pack" type="file" accept=".zip">
         <label for="world">Optional saved world ZIP</label>
         <input id="world" name="world" type="file" accept=".zip">
-        <p class="muted help">Supports ready-to-run server.jar ZIPs, Fabric ServerPackCreator ZIPs, and the official RLCraft Dregora Forge 1.12.2 server pack ZIP (including one ZIP wrapper). Dregora uses Java 8 and special OTG world settings. World ZIPs require exactly one level.dat. Uploading a pack installs it offline; choose Make Active when ready to play. CurseForge API key is optional for the Java 21 runtime.</p>
+        <p class="muted help">FTB URLs are installed automatically by the official FTB installer when first activated; a version ID pins the exact release. ZIP uploads support ready-to-run server.jar ZIPs, Fabric ServerPackCreator and RLCraft Dregora (Java 8 / OTG). World ZIPs require exactly one level.dat. Profiles install offline: choose Make Active when ready to play.</p>
         <button type="submit">Install Server</button>
       </form>
     </section>
@@ -528,7 +544,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
@@ -587,13 +603,25 @@
     $('start').onclick=()=>{const s=active();if(s)doAction(s.id,'start')};
     $('stop').onclick=()=>{const s=active();if(s&&confirm('Stop "'+s.name+'"?'))doAction(s.id,'stop')};
     $('restart').onclick=()=>{const s=active();if(s&&confirm('Restart "'+s.name+'"?'))doAction(s.id,'restart')};
+    function updateFtbOptions(){
+      const enabled=!!$('ftbUrl').value.trim();
+      $('ftbOptions').hidden=!enabled;
+      $('ftbVersion').required=enabled;
+    }
+    $('ftbUrl').addEventListener('input',updateFtbOptions);
+    updateFtbOptions();
     $('create').onsubmit=async event=>{
       event.preventDefault();
       if(busy)return;
       const form=new FormData(event.target);
       for(const key of ['pack','world'])if(!form.get(key)?.size)form.delete(key);
+      const count=[!!form.get('cf_url')?.trim(),!!form.get('ftb_url')?.trim(),!!form.get('pack')].filter(Boolean).length;
+      if(count!==1){message('Provide one source: CurseForge URL, FTB URL, or server ZIP.');return}
+      if(form.get('ftb_url')&&!/^[1-9][0-9]*$/.test(form.get('ftb_version_id')||'')){
+        message('Enter the FTB version ID shown on the pack Versions tab.');return;
+      }
       setBusy(true);message('Uploading and installing server profile…');
-      try{await request('/servers',{method:'POST',body:form});event.target.reset();await refresh(true);message('Server installed. Select it above and click Make Active.')}
+      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();await refresh(true);message('Server profile installed. Select it above and click Make Active when ready; FTB downloads on first startup.')}
       catch(error){message(error.message)}
       finally{setBusy(false);paint()}
     };
