@@ -129,6 +129,23 @@ def install_profile(root, index, valid=True):
     return sid
 
 
+
+def test_new_and_switched_game_containers_have_no_cpu_restriction(environment):
+    # Minecraft should be able to schedule work on every host logical CPU.
+    # No CPU quota, shares override, or affinity restriction is set at creation.
+    first=install_profile(portal.ROOT,101)
+    second=install_profile(portal.ROOT,102)
+    portal.activate(first)
+    portal.activate(second)
+    assert len(environment.containers.creations)==2
+    for settings in environment.containers.creations:
+        for key in ("nano_cpus","cpu_quota","cpu_period","cpu_shares","cpuset_cpus"):
+            assert key not in settings
+        # Removing CPU limits must not also remove memory protection.
+        assert settings["mem_limit"]=="7g"
+
+
+
 def test_switch_reuses_one_public_port_and_preserves_old_install(environment):
     a=install_profile(portal.ROOT,1)
     b=install_profile(portal.ROOT,2)
