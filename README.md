@@ -9,6 +9,8 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Keep each profile's mod files, configs, saves, whitelist and operators on disk.
 - Permanently remove unused inactive servers through an explicit, guarded Delete Server action.
 - Manage Java player access and operator status while the active Minecraft server is ready.
+- Execute Minecraft server commands in a restricted-to-the-game **Console** panel, displaying command responses.
+- Change common `server.properties` values through GUI toggles, dropdowns, and number inputs.
 - Change a server's RAM allocation after installation, independently for each profile.
 - Install from a CurseForge URL, a supported server ZIP, or a Fabric ServerPackCreator package (including a ZIP wrapped inside a ZIP).
 
@@ -230,9 +232,45 @@ This only downloads the image; it doesn't stop the existing Minecraft server. In
 - **Restart:** restarts the selected running server. It disconnects players.
 - **Refresh:** updates status in the portal.
 - **Logs:** shows recent output from that profile's Docker container. Use this first when the container exits or players cannot connect.
+- **Console:** execute commands on the selected, running Minecraft server (once RCON is enabled), with in-page results. This grants full Minecraft administrator command access.
+- **Settings:** edit common `server.properties` values through a friendly form. Settings are applied when Minecraft next starts or restarts, not instantly.
 - **Delete Server:** permanently removes an *inactive, fully stopped* profile, its Docker container and its saved files, after exact-name confirmation. Not available on the selected server.
 
 Players always use the **same Minecraft address and port**; the portal changes which profile is currently serving that address. **Stopped worlds remain on disk.**
+
+### Minecraft console — commands and responses
+
+Each installed profile has a **Console** button. To execute a command, the server must be **selected, running, and RCON-enabled**. Enter one Minecraft server command in the input and click **Execute**. For example:
+
+```text
+list
+say Server maintenance in 5 minutes
+time query daytime
+```
+
+The portal returns the Minecraft console's response in the panel (if a command produces no response, it reports that no text was returned). The command box accepts the leading `/` familiar from in-game commands but removes that slash before invoking Minecraft's console. It accepts **one command at a time**, up to 256 characters; it refuses embedded newlines/control characters.
+
+The endpoint uses an authenticated Docker exec of `rcon-cli` with the command passed as **a single argument**, never a host shell or Docker command. **You cannot run Linux commands through this input.** RCON port 25575 is still **not published** to the LAN or internet.
+
+**Treat Console as full Minecraft administrator access.** Commands can affect worlds, players, inventories, and server availability (including stopping Minecraft). There is no command allowlist, secondary role, replay log or undo. A command's console response is not proof that a modification was safe or successful. Only trusted portal users should have the access token. On older game containers, use **Players → Enable Players** for the one-time RCON migration.
+
+### Server settings — GUI for server.properties
+
+Each server's **Settings** panel contains supported `server.properties` controls:
+
+| Category | Controls |
+| --- | --- |
+| Player experience | **PvP on/off**, **Difficulty** (Peaceful/Easy/Normal/Hard), **Default game mode** (Survival/Creative/Adventure/Spectator) |
+| Gameplay | **Allow flight**, **Command blocks**, **Spawn hostile mobs**, **Spawn animals**, **Spawn NPCs/villagers**, **Allow Nether** |
+| Capacity and performance | **Maximum players** (1–100), **View distance** (3–16 chunks), **Spawn protection radius** (0–128) |
+
+The editor reads valid existing `server.properties` values, then overlays the settings you've saved in the portal. You can change settings on **inactive or running** profiles without interrupting an active game. Click **Save Settings**; the profile's desired settings are saved persistently in `meta.json`. The next time the game container is started or **Restart** is clicked, MineCraftDeployer compares the desired settings with its current container, **recreates only that game container if needed**, and passes the edited values to the official image, which updates `server.properties` during initialization. **Until restart, the existing Minecraft server still uses its previous settings.** A pending-settings message reminds you of this.
+
+The portal does **not** provide a raw file editor or expose arbitrary Java/server options. It intentionally excludes `online-mode`, whitelist/RCON credentials, world names, world generation, and other values that could be unsafe or undermine player authentication. For whitelist and operators, use **Players**. Minecraft Java dedicated servers do **not** have an `enable-cheats` property: grant **OP** to a trusted player when they need commands.
+
+**Dregora safeguards:** this modpack requires Hard difficulty, flight enabled, command blocks enabled, view distance 10, and its world-generation values `level-name=DregoraRL`, `level-type=OTG` and `max-tick-time=-1`. Settings that overlap the first four are shown as **modpack locked**; the other world-generation properties are not editable. These are important for world correctness.
+
+As with RAM edits, the settings change is not a live Minecraft command: **restarting the game disconnects players**. Back up valuable worlds before risky adjustments to gameplay or modpack behavior. Tests use simulated Docker/RCON and do not establish that every mod honors every property.
 
 ### Delete an old server
 
@@ -390,7 +428,7 @@ The portal binds TCP **8080** at the configured local IP. Game containers publis
 ## Security and known limitations
 
 - **The portal is an administrator tool, not a public website.** The management token grants broad powers, including OP, and there is no account system, role separation, or request rate limiting.
-- The portal mounts `/var/run/docker.sock`, which is effectively **root-level control of the Docker host**. Keep it on a trusted LAN; don't share the token with strangers or expose port 8080 on the router.
+- The portal mounts `/var/run/docker.sock`, which is effectively **root-level control of the Docker host**. Keep it on a trusted LAN; don't share the token with strangers or expose port 8080 on the router. The new Console feature also grants unrestricted **Minecraft** operator-level command execution, but never Linux shell access.
 - Plain HTTP sends the token over the LAN without encryption. For access from outside the trusted network, do not simply forward the portal port; use a properly authenticated/encrypted private access solution instead.
 - The Minecraft game containers intentionally don't set `no-new-privileges` due to the observed image startup failure on Snap Docker. This reduces defense in depth. Use **trusted modpacks**; game mods execute code inside containers.
 - Java 17/21 version detection currently applies to **ServerPackCreator Fabric** packages. Other pack formats may need manual setup or different runtimes.
