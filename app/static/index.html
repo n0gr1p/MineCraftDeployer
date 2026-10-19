@@ -31,7 +31,7 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.backup-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
     .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
     .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
     .setting-field label{margin:0 0 6px;font-size:.9rem}
@@ -138,7 +138,8 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openBackupId=null;
+    const backupListings={},backupErrors={};
     const consoleOutputs={};
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
@@ -153,7 +154,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton')){
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.backupButton')){
         const confirmation=btn.closest('.delete-panel')?.querySelector('input');
         btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
       }
@@ -437,6 +438,61 @@
       panel.append(out);
       return panel;
     }
+    async function loadBackups(s){
+      if(busy)return;
+      try{
+        backupListings[s.id]=await request('/servers/'+s.id+'/backups');
+        delete backupErrors[s.id];
+      }catch(error){
+        backupErrors[s.id]=error.message;
+      }
+      paint();
+    }
+    async function createBackup(s){
+      if(busy||!['exited','created','not-created'].includes(s.status))return;
+      if(!confirm('Create a complete offline backup of '+s.name+' on the 20 TB backup drive? The game must remain stopped until it finishes.'))return;
+      setBusy(true);
+      message('Backing up '+s.name+'… Large modpacks may take several minutes. Do not start or delete this server until the backup completes.');
+      try{
+        const result=await request('/servers/'+s.id+'/backups',{method:'POST'});
+        message('Backup created: '+result.filename+' ('+Math.round(result.size_bytes/1048576)+' MiB).');
+        backupListings[s.id]=await request('/servers/'+s.id+'/backups');
+        delete backupErrors[s.id];
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function backupPanel(s){
+      const panel=document.createElement('div');panel.className='backup-panel';
+      panel.hidden=openBackupId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      intro.textContent='Safe offline backups only: the Minecraft game must be stopped. Each backup contains the complete server files and configuration, stored as an uncompressed TAR with SHA256 manifest on your separate backup drive. Scheduling, live backups, and in-portal restore are not yet enabled.';
+      panel.append(intro);
+      const allowed=['exited','created','not-created'].includes(s.status);
+      panel.append(actionButton('Create Offline Backup','secondary',()=>createBackup(s),!allowed));
+      if(!allowed){
+        const warning=document.createElement('p');warning.className='help';
+        warning.textContent='Stop the server first; creating a consistent backup of a running world is not enabled yet.';
+        panel.append(warning);
+      }
+      const error=backupErrors[s.id];
+      if(error){
+        const warning=document.createElement('p');warning.className='help';
+        warning.textContent=error;panel.append(warning);
+      }
+      const listing=backupListings[s.id];
+      if(listing){
+        const title=document.createElement('p');
+        title.textContent=listing.length?listing.length+' completed backup(s):':'No completed backups yet.';
+        panel.append(title);
+        for(const entry of listing){
+          const item=document.createElement('p');item.className='help muted';
+          item.textContent=entry.created_utc+' — '+entry.filename+' ('+
+            Math.round(entry.size_bytes/1048576)+' MiB, SHA256 '+entry.sha256.slice(0,12)+'…)';
+          panel.append(item);
+        }
+      }
+      return panel;
+    }
     function actionButton(text,kind,callback,disabled=false){
       const btn=document.createElement('button');
       btn.className=(kind||'secondary')+' playerButton';
@@ -573,6 +629,13 @@
         consoleBtn.classList.add('consoleButton');
         consoleBtn.setAttribute('aria-expanded',String(openConsoleId===s.id));
         box.append(consoleBtn);
+        const backupBtn=actionButton('Backups','secondary',()=>{
+          openBackupId=openBackupId===s.id?null:s.id;
+          if(openBackupId===s.id)loadBackups(s);else paint();
+        });
+        backupBtn.classList.add('backupButton');
+        backupBtn.setAttribute('aria-expanded',String(openBackupId===s.id));
+        box.append(backupBtn);
         const deletable=!s.is_active&&['exited','created','not-created'].includes(s.status);
         if(deletable){
           const deleteBtn=actionButton('Delete Server','danger',()=>{
@@ -582,7 +645,7 @@
           deleteBtn.setAttribute('aria-expanded',String(openDeleteId===s.id));
           box.append(deleteBtn);
         }
-        box.append(playerPanel(s),ramPanel(s),settingsPanel(s),consolePanel(s));
+        box.append(playerPanel(s),ramPanel(s),settingsPanel(s),consolePanel(s),backupPanel(s));
         if(deletable)box.append(deletePanel(s));
         area.append(box);
       }
