@@ -189,6 +189,13 @@ def read_properties(meta):
                 converted=int(value)
             else:
                 converted=value.lower()
+                # Old Minecraft/Forge server.properties may encode game
+                # mode/difficulty as numeric IDs rather than words.
+                legacy={
+                    "difficulty":{"0":"peaceful","1":"easy","2":"normal","3":"hard"},
+                    "gamemode":{"0":"survival","1":"creative","2":"adventure","3":"spectator"}
+                }
+                converted=legacy.get(key,{}).get(converted,converted)
             values[key]=normalized_setting(key,converted)
         except ValueError:
             values[key]=spec[2]
