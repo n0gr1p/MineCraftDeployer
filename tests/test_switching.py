@@ -554,3 +554,102 @@ def test_ram_change_rejects_unexpected_running_inactive_profile(environment):
     assert exc.value.status_code==409
     assert portal.meta_for(other)["ram_gb"]==6
     assert stray.status=="running"
+
+
+DREGORA_README = """Important Notices:
+DREGORA WILL NOT GENERATE CORRECTLY IF level-name IS NOT DregoraRL & level-type IS NOT OTG.
+Quick Windows Server Install Guide
+Download the Forge 2860 server installer.
+level-type=OTG
+level-name=DregoraRL
+"""
+
+def dregora_pack(prefix="",readme=DREGORA_README,include_config=True):
+    archive=io.BytesIO()
+    with zipfile.ZipFile(archive,"w") as z:
+        z.writestr(prefix+"SERVER README OR DIE.txt",readme)
+        z.writestr(prefix+"mods/terrain.jar",b"mock OTG mod file")
+        if include_config:
+            z.writestr(prefix+"config/example.cfg",b"configured=true")
+        z.writestr(prefix+"start.sh","echo MUST_NOT_EXECUTE")
+    return archive.getvalue()
+
+
+def test_dregora_zip_installs_and_runs_with_exact_forge_settings(environment):
+    with TestClient(portal.app) as http:
+        result=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Dregora","ram_gb":"8","players":"TestPlayer"},
+            files={"pack":("Dregora-server-pack.zip",dregora_pack(),"application/zip")})
+    assert result.status_code==200,result.text
+    sid=result.json()["id"]
+    meta=portal.meta_for(sid)
+    assert meta["mode"]=="forge"
+    assert meta["minecraft_version"]=="1.12.2"
+    assert meta["loader_version"]=="14.23.5.2860"
+    assert meta["java_version"]==8
+    assert meta["world_name"]=="DregoraRL"
+    portal.activate(sid)
+    game=environment.containers.creations[-1]
+    assert game["environment"]["TYPE"]=="FORGE"
+    assert game["environment"]["VERSION"]=="1.12.2"
+    assert game["environment"]["FORGE_VERSION"]=="14.23.5.2860"
+    for key,val in {
+        "LEVEL":"DregoraRL","LEVEL_TYPE":"OTG",
+        "ALLOW_FLIGHT":"TRUE","DIFFICULTY":"hard",
+        "MAX_TICK_TIME":"-1","ENABLE_COMMAND_BLOCK":"TRUE",
+        "VIEW_DISTANCE":"10","MEMORY":"8G"}.items():
+        assert game["environment"][key]==val
+    assert game["mem_limit"]=="9g"
+    assert "server.jar" not in game["environment"].get("CUSTOM_SERVER","")
+    assert "start.sh" not in str(game["environment"])
+    assert (portal.ROOT/sid/"minecraft"/"mods"/"terrain.jar").exists()
+    assert portal.active_id()==sid
+
+
+def test_dregora_single_directory_wrapper_is_flattened(environment):
+    wrapped=dregora_pack(prefix="RLCraft Dregora server pack/")
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Dregora","players":"TestPlayer"},
+            files={"pack":("dregora.zip",wrapped,"application/zip")})
+    assert response.status_code==200,response.text
+    data=portal.ROOT/response.json()["id"]/"minecraft"
+    assert (data/"mods"/"terrain.jar").is_file()
+    assert not (data/"RLCraft Dregora server pack").exists()
+
+
+def test_dregora_world_import_uses_otg_level_name(environment):
+    world=io.BytesIO()
+    with zipfile.ZipFile(world,"w") as z:
+        z.writestr("SavedWorld/level.dat",b"existing mock world")
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Dregora world","players":"TestPlayer"},
+            files={"pack":("dregora.zip",dregora_pack(),"application/zip"),
+                   "world":("world.zip",world.getvalue(),"application/zip")})
+    assert response.status_code==200,response.text
+    data=portal.ROOT/response.json()["id"]/"minecraft"
+    assert (data/"DregoraRL"/"level.dat").read_bytes()==b"existing mock world"
+    assert not (data/"world"/"level.dat").exists()
+
+
+def test_dregora_malformed_pack_is_rejected_without_starting_any_game(environment):
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"broken","players":"TestPlayer"},
+            files={"pack":("dregora.zip",dregora_pack(include_config=False),"application/zip")})
+    assert response.status_code==400
+    assert "Incomplete Dregora server pack" in response.json()["detail"]
+    assert not environment.containers.creations
+
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"bad version","players":"TestPlayer"},
+            files={"pack":("dregora.zip",dregora_pack(readme="Forge 9999.9999"),"application/zip")})
+    assert response.status_code==400
+    assert "Unrecognized Dregora server README" in response.json()["detail"]
