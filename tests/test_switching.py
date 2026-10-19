@@ -57,6 +57,9 @@ class FakeContainer:
             return SimpleNamespace(exit_code=1,output=b"RCON connection refused")
         if cmd[0]!="rcon-cli":
             raise AssertionError("Only rcon-cli console commands are permitted")
+        if len(cmd)==2:
+            # Simulate one complete Minecraft command, never a shell invocation.
+            return SimpleNamespace(exit_code=0,output=("Minecraft response: "+cmd[1]).encode())
         phrase={
             ("whitelist","add"):"Added {name} to the whitelist",
             ("whitelist","remove"):"Removed {name} from the whitelist",
@@ -782,3 +785,187 @@ def test_delete_refuses_bad_directory_identity(environment):
         delete_profile(sid,"Pack 52")
     assert e.value.status_code==409
     assert (portal.ROOT/sid/"minecraft"/"server.jar").exists()
+
+
+def save_settings(sid,changes):
+    return portal.update_settings(
+        sid,portal.SettingsUpdate(properties=changes),
+        authorization="Bearer "+portal.TOKEN)
+
+
+def issue_console(sid,command):
+    return portal.run_console(
+        sid,portal.ConsoleCommand(command=command),
+        authorization="Bearer "+portal.TOKEN)
+
+
+def test_settings_read_existing_server_properties_instead_of_generic_defaults(environment):
+    sid=install_profile(portal.ROOT,61)
+    props=portal.ROOT/sid/"minecraft"/"server.properties"
+    props.write_text("# Existing modpack settings\npvp=false\ndifficulty=hard\nview-distance=9\nmax-players=18\n")
+    state=portal.state(portal.meta_for(sid))
+    assert state["server_properties"]["pvp"] is False
+    assert state["server_properties"]["difficulty"]=="hard"
+    assert state["server_properties"]["view-distance"]==9
+    assert state["server_properties"]["max-players"]==18
+    assert state["settings_pending"] is False
+
+
+def test_settings_live_save_does_not_restart_and_apply_on_explicit_restart(environment):
+    sid=install_profile(portal.ROOT,62)
+    portal.activate(sid)
+    old=environment.containers.items[sid]
+    profile_dir=portal.ROOT/sid/"minecraft"
+    (profile_dir/"world").mkdir()
+    (profile_dir/"world"/"level.dat").write_bytes(b"keep this world")
+
+    response=save_settings(sid,{"pvp":False,"difficulty":"hard",
+         "gamemode":"creative","view-distance":8,"max-players":13,
+         "allow-flight":True,"enable-command-block":True})
+    assert response["server_properties"]["pvp"] is False
+    assert response["settings_pending"] is True
+    assert old.status=="running"
+    assert environment.containers.items[sid] is old
+    assert len(environment.containers.creations)==1
+    assert portal.meta_for(sid)["server_properties"]["max-players"]==13
+
+    result=portal.restart_active(sid)
+    assert result["status"]=="running"
+    assert result["settings_pending"] is False
+    assert environment.containers.items[sid] is not old
+    env=environment.containers.creations[-1]["environment"]
+    for key,value in {
+        "PVP":"FALSE","DIFFICULTY":"hard","MODE":"creative",
+        "VIEW_DISTANCE":"8","MAX_PLAYERS":"13","ALLOW_FLIGHT":"TRUE",
+        "ENABLE_COMMAND_BLOCK":"TRUE"}.items():
+        assert env[key]==value
+    assert (profile_dir/"world"/"level.dat").read_bytes()==b"keep this world"
+    assert portal.active_id()==sid
+
+
+def test_offline_settings_save_applies_on_first_start(environment):
+    sid=install_profile(portal.ROOT,63)
+    resp=save_settings(sid,{"pvp":False,"spawn-monsters":False,
+                           "spawn-protection":0,"allow-nether":False})
+    assert resp["settings_pending"] is False
+    assert resp["status"]=="not-created"
+    assert not environment.containers.creations
+    portal.activate(sid)
+    env=environment.containers.creations[-1]["environment"]
+    assert env["PVP"]=="FALSE"
+    assert env["SPAWN_MONSTERS"]=="FALSE"
+    assert env["SPAWN_PROTECTION"]=="0"
+    assert env["ALLOW_NETHER"]=="FALSE"
+
+
+def test_settings_update_rejects_invalid_fields_and_types_without_partial_save(environment):
+    sid=install_profile(portal.ROOT,64)
+    for payload in [
+        {"online-mode":False}, {"level-name":"newworld"},
+        {"pvp":"false"}, {"difficulty":"extreme"},
+        {"max-players":101}, {"max-players":0}, {"view-distance":2},
+        {"allow-flight":1}, {"spawn-protection":True},
+    ]:
+        with pytest.raises(HTTPException) as err:
+            save_settings(sid,{"pvp":False,**payload})
+        assert err.value.status_code==400
+        assert "server_properties" not in portal.meta_for(sid)
+    assert not environment.containers.creations
+
+
+def test_dregora_required_world_settings_are_locked_in_backend(environment):
+    sid=install_profile(portal.ROOT,65)
+    meta=portal.meta_for(sid)
+    meta["pack_format"]="rlcraft-dregora"
+    meta["mode"]="forge"
+    (portal.ROOT/sid/"meta.json").write_text(json.dumps(meta))
+    state=portal.state(meta)
+    assert state["server_properties"]["difficulty"]=="hard"
+    assert state["server_properties"]["allow-flight"] is True
+    assert state["server_properties"]["enable-command-block"] is True
+    assert state["server_properties"]["view-distance"]==10
+    assert set(portal.DREGORA_LOCKED)==set(state["locked_properties"])
+    for key in portal.DREGORA_LOCKED:
+        with pytest.raises(HTTPException) as err:
+            save_settings(sid,{key:"normal"})
+        assert err.value.status_code==409
+    saved=save_settings(sid,{"pvp":False,"max-players":9})
+    assert saved["server_properties"]["max-players"]==9
+    assert portal.meta_for(sid)["server_properties"]["pvp"] is False
+
+
+def test_settings_endpoint_requires_token_and_valid_json(environment):
+    sid=install_profile(portal.ROOT,66)
+    with TestClient(portal.app) as http:
+        path="/api/servers/"+sid+"/settings"
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        assert http.patch(path,json={"properties":{"pvp":False}}).status_code==401
+        assert http.patch(path,headers=auth,json={"properties":{"pvp":"no"}}).status_code==400
+        ok=http.patch(path,headers=auth,json={"properties":{"pvp":False,"difficulty":"normal"}})
+        assert ok.status_code==200,ok.text
+        assert ok.json()["server_properties"]["pvp"] is False
+        assert ok.json()["server_properties"]["difficulty"]=="normal"
+
+
+def test_console_commands_are_rcon_only_selected_running_server(environment):
+    sid=install_profile(portal.ROOT,67)
+    other=install_profile(portal.ROOT,68)
+    portal.activate(sid)
+    c=environment.containers.items[sid]
+    response=issue_console(sid,"/time query daytime")
+    assert response["command"]=="time query daytime"
+    assert "Minecraft response" in response["output"]
+    assert c.commands==[["rcon-cli","time query daytime"]]
+    assert issue_console(sid,"say hello")["output"]=="Minecraft response: say hello"
+
+    with pytest.raises(HTTPException) as err:
+        issue_console(other,"list")
+    assert err.value.status_code==409
+    portal.stop_active(sid)
+    with pytest.raises(HTTPException) as err:
+        issue_console(sid,"list")
+    assert err.value.status_code==409
+    assert len(c.commands)==2
+
+
+def test_console_rejects_multiline_overlong_and_unready_without_exec(environment):
+    sid=install_profile(portal.ROOT,69)
+    portal.activate(sid)
+    c=environment.containers.items[sid]
+    for bad in ["", "/","list\nstop", "say hello\rworld", "a"*257, "hi\x00there"]:
+        try:
+            with pytest.raises((HTTPException,ValueError)) as err:
+                issue_console(sid,bad)
+        except AssertionError:
+            raise AssertionError("Invalid console command was accepted: "+repr(bad))
+    assert not c.commands
+    c.console_ready=False
+    with pytest.raises(HTTPException) as err:
+        issue_console(sid,"list")
+    assert err.value.status_code==409
+    assert c.commands==[["rcon-cli","list"]]
+
+
+def test_console_api_requires_auth_and_rejects_incorrect_action(environment):
+    sid=install_profile(portal.ROOT,70)
+    portal.activate(sid)
+    with TestClient(portal.app) as http:
+        path="/api/servers/"+sid+"/console"
+        headers={"Authorization":"Bearer "+portal.TOKEN}
+        assert http.post(path,json={"command":"list"}).status_code==401
+        assert http.post(path,headers=headers,json={"command":"list\nstop"}).status_code==400
+        ok=http.post(path,headers=headers,json={"command":"list"})
+        assert ok.status_code==200,ok.text
+        assert ok.json()["output"]=="Minecraft response: list"
+
+
+def test_settings_changes_survive_profile_switching_and_restart(environment):
+    a=install_profile(portal.ROOT,71)
+    b=install_profile(portal.ROOT,72)
+    portal.activate(a)
+    save_settings(a,{"pvp":False})
+    portal.activate(b)
+    assert environment.containers.items[a].status=="exited"
+    portal.activate(a)
+    assert environment.containers.creations[-1]["environment"]["PVP"]=="FALSE"
+    assert portal.state(portal.meta_for(a))["settings_pending"] is False
