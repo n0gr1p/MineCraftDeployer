@@ -197,6 +197,8 @@ def validate_effective(profile_dir, meta):
     effective = zip_location(profile_dir) / EFFECTIVE
     if not effective.is_file() or effective.is_symlink():
         raise ValueError("Effective CurseForge ZIP is missing; save mod changes again")
+    if _digest(effective) != meta.get("effective_sha256"):
+        raise ValueError("Effective CurseForge ZIP checksum mismatch; save mod changes again")
     detected = inspect_curseforge_export(effective)
     if not detected or any(meta.get(k) != v for k, v in detected.items()):
         raise ValueError("Effective CurseForge ZIP has invalid runtime metadata")
