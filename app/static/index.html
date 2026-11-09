@@ -103,7 +103,7 @@
         <p class="muted help">Required for the internet-accessible game. Comma-separated Minecraft Java usernames (not Xbox gamertags).</p>
         <label for="ram">RAM (GB)</label>
         <input id="ram" name="ram_gb" type="number" min="2" max="12" value="6">
-        <p class="muted help">Choose <strong>one</strong> source: CurseForge URL, FTB URL, or server ZIP.</p>
+        <p class="muted help">Choose <strong>one</strong> source: CurseForge URL, FTB URL, or ZIP (server pack / custom CurseForge export).</p>
         <label for="cfUrl">CurseForge modpack URL</label>
         <input id="cfUrl" name="cf_url" type="url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
         <label for="ftbUrl">OR Feed The Beast (FTB) modpack URL</label>
@@ -121,11 +121,11 @@
           </select>
           <p class="muted help">FTB lists the required Java version under Requirements on the modpack page. Minecraft runs in Docker; no Java installation on Ubuntu needed.</p>
         </div>
-        <label for="pack">OR ready-to-run server ZIP</label>
+        <label for="pack">OR server ZIP / customized CurseForge export ZIP</label>
         <input id="pack" name="pack" type="file" accept=".zip">
         <label for="world">Optional saved world ZIP</label>
         <input id="world" name="world" type="file" accept=".zip">
-        <p class="muted help">FTB URLs are installed automatically by the official FTB installer when first activated; a version ID pins the exact release. ZIP uploads support ready-to-run server.jar ZIPs, Fabric ServerPackCreator and RLCraft Dregora (Java 8 / OTG). World ZIPs require exactly one level.dat. Profiles install offline: choose Make Active when ready to play.</p>
+        <p class="muted help">FTB URLs download when activated. ZIP uploads also accept CurseForge Share Profile exports, preserving the exact mod file IDs and overrides (including your added mods). The Minecraft Docker image downloads the mods when you first activate the profile and filters recognized client-only mods; some files may require manual download or further exclusion. Minecraft 26.3 exports use Java 25. World ZIPs require exactly one level.dat. Installation does not stop the active server. For large packs, select 8+ GB RAM.</p>
         <button type="submit">Install Server</button>
       </form>
     </section>
@@ -544,7 +544,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':s.mode==='curseforge_zip'?'Custom CurseForge '+s.minecraft_version+' / '+s.loader_type+' / '+s.mod_count+' mod refs / Java '+s.java_version:s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
@@ -616,12 +616,12 @@
       const form=new FormData(event.target);
       for(const key of ['pack','world'])if(!form.get(key)?.size)form.delete(key);
       const count=[!!form.get('cf_url')?.trim(),!!form.get('ftb_url')?.trim(),!!form.get('pack')].filter(Boolean).length;
-      if(count!==1){message('Provide one source: CurseForge URL, FTB URL, or server ZIP.');return}
+      if(count!==1){message('Provide one source: CurseForge URL, FTB URL, or ZIP (server pack / custom CurseForge export).');return}
       if(form.get('ftb_url')&&!/^[1-9][0-9]*$/.test(form.get('ftb_version_id')||'')){
         message('Enter the FTB version ID shown on the pack Versions tab.');return;
       }
       setBusy(true);message('Uploading and installing server profile…');
-      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();await refresh(true);message('Server profile installed. Select it above and click Make Active when ready; FTB downloads on first startup.')}
+      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();await refresh(true);message('Server profile installed offline. Select it above and click Make Active when ready. Custom CurseForge exports download referenced mods on first startup.')}
       catch(error){message(error.message)}
       finally{setBusy(false);paint()}
     };
