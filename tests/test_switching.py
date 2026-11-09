@@ -1353,6 +1353,7 @@ def test_mod_patch_preserves_original_zip_and_shows_client_update_notice(environ
     assert details["restart_required"] is False  # Offline profile, no game to restart.
     assert (location/"curseforge-pack.zip").read_bytes()==original
     effective=location/"curseforge-effective.zip"
+    assert portal.meta_for(sid)["effective_sha256"]==hashlib.sha256(effective.read_bytes()).hexdigest()
     with zipfile.ZipFile(effective) as archive:
         manifest=json.loads(archive.read("manifest.json"))
         ids={item["projectID"]:item["fileID"] for item in manifest["files"]}
@@ -1519,4 +1520,25 @@ def test_diagnostic_returns_none_without_evidence_of_mod_failure():
     from app.mod_compat import diagnostics
     assert diagnostics("[init] Running as uid=1000 gid=1000\nModpack ready") is None
     assert diagnostics("[init] Running as uid=1000 gid=1000\nMinecraft server failed.")["kind"]=="startup-failure"
+
+
+
+def test_tampered_derived_overrides_are_detected_before_server_switch(environment):
+    current=install_profile(portal.ROOT,125)
+    portal.activate(current)
+    sid=install_custom_mod_profile(environment)
+    with TestClient(portal.app) as http:
+        response=http.put(f"/api/servers/{sid}/mods",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            json={"changes":[{"project_id":606989,"name":"CreativeCore","action":"replace",
+                "replacement_file_id":9009764}]})
+    assert response.status_code==200,response.text
+    archive=portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-effective.zip"
+    with zipfile.ZipFile(archive,"a") as z:
+        z.writestr("overrides/config/malicious.sh","echo do-not-run")
+    with pytest.raises(HTTPException) as failure:
+        portal.activate(sid)
+    assert "checksum" in failure.value.detail
+    assert environment.containers.items[current].status=="running"
+    assert portal.active_id()==current
 
