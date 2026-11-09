@@ -485,6 +485,8 @@ def state(meta):
             "mode":meta.get("mode","zip"),
             "minecraft_version":meta.get("minecraft_version"),
             "loader_version":meta.get("loader_version"),
+            "loader_type":meta.get("loader_type"),
+            "mod_count":meta.get("mod_count"),
             "java_version":meta.get("java_version",21),
             "ftb_modpack_id":meta.get("ftb_modpack_id"),
             "ftb_version_id":meta.get("ftb_version_id"),
