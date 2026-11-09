@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -159,15 +160,20 @@ def generate_effective(profile_dir, meta, changes):
         with zipfile.ZipFile(original) as src, zipfile.ZipFile(temp_path, "w") as dst:
             dst.comment = src.comment
             for info in src.infolist():
-                data = src.read(info)
                 if info.filename == "manifest.json":
-                    edited = json.loads(data)
+                    edited = json.loads(src.read(info))
                     for entry in edited["files"]:
                         replacement = replacements.get(entry["projectID"])
                         if replacement is not None:
                             entry["fileID"] = replacement
-                    data = json.dumps(edited, indent=2).encode("utf-8")
-                dst.writestr(info, data)
+                    dst.writestr(info, json.dumps(edited, indent=2).encode("utf-8"))
+                elif info.is_dir():
+                    dst.writestr(info, b"")
+                else:
+                    # A client export may include large resources. Never buffer
+                    # an entire shader pack or mod file in portal RAM.
+                    with src.open(info) as reader, dst.open(info, "w") as writer:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
         with zipfile.ZipFile(temp_path) as archive:
             if archive.testzip() is not None:
                 raise ValueError("Generated CurseForge ZIP failed integrity validation")
@@ -211,8 +217,11 @@ def diagnostics(log):
     if isinstance(log, bytes):
         log = log.decode("utf-8", "replace")
     boot = log.rsplit("[init] Running as uid=", 1)[-1][-100000:]
-    if re.search(r"Done \([0-9.]+s\)! For help, type", boot):
-        return None
+    last_ready = max((match.start() for match in
+                      re.finditer(r"Done \([0-9.]+s\)! For help, type", boot)), default=-1)
+    # Errors from an older failed attempt do not survive a later successful boot.
+    if last_ready >= 0:
+        boot = boot[last_ready:]
     lines = boot.splitlines()
     for idx, line in enumerate(lines):
         if "@Mixin target" in line and "was not found" in line:
