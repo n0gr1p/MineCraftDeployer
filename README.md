@@ -12,7 +12,7 @@ A **self-hosted, LAN-only management portal for Minecraft Java Edition servers**
 - Execute Minecraft server commands in a restricted-to-the-game **Console** panel, displaying command responses.
 - Change common `server.properties` values through GUI toggles, dropdowns, and number inputs.
 - Change a server's RAM allocation after installation, independently for each profile.
-- Install from a CurseForge URL, **Feed The Beast (FTB) URL and pinned version ID**, or supported server ZIP (including Fabric ServerPackCreator and Dregora).
+- Install from a CurseForge URL, **Feed The Beast (FTB) URL and pinned version ID**, supported server ZIP, or **private/customized CurseForge client-export ZIP** (including added mods).
 
 **This is not a hosting service.** You supply the Linux machine, Docker, storage, and (for remote friends) router configuration. Minecraft Java Edition only.
 
@@ -174,7 +174,7 @@ Under **Install a new server**, fill in:
 1. **Server name:** a friendly label such as `Family Adventure`.
 2. **Allowed Minecraft Java player names:** 1–50 Minecraft **Java** usernames, separated by commas or spaces. Names must be 3–16 letters, numbers, or underscores. **Periods, spaces within names, and Xbox gamertags are not valid** in this Java-only implementation.
 3. **RAM (GB):** initial heap size for the game, between 2 GB and `MCD_MAX_RAM_GB`. You can change this later without reinstalling.
-4. **Exactly one modpack source:** either a valid HTTPS CurseForge Minecraft modpack URL **or** a supported server ZIP.
+4. **Exactly one modpack source:** an official CurseForge URL, FTB URL with pinned version, supported server ZIP, or a **custom CurseForge Share Profile export ZIP**.
 5. **Optional saved world ZIP:** a world containing **exactly one** `level.dat` somewhere in the archive. The containing save folder becomes the server's `world` directory.
 
 Click **Install Server**. Uploading creates an **installed/offline profile**; it does **not** immediately start a playable server. For a new game, the server generates its own world when first launched.
@@ -186,14 +186,26 @@ Click **Install Server**. Uploading creates an **installed/offline profile**; it
 | Ready-to-run `server.jar` at the top level | Supported; defaults to Java 21 |
 | Fabric ServerPackCreator `variables.txt`, with Minecraft version, Fabric loader version, and recommended Java 17 or 21 | Supported; the Docker image installs the Fabric runtime |
 | One outer ZIP containing the supported inner server ZIP | Supported; automatically unwrapped (e.g. Prominence II / Hasturian Era) |
-| CurseForge **client export** (not a dedicated server pack) | Not supported |
+| CurseForge **client export** (`manifest.json` plus `overrides/`, including private modified exports) | Supported through the official AUTO_CURSEFORGE installer with a preserved local ZIP and exact mod file IDs |
 | **RLCraft Dregora** official Forge 1.12.2 server ZIP with its `SERVER README OR DIE.txt` and `mods/` + `config/` | Supported by the specialized Forge 2860 + Java 8 runtime configuration; live verification pending |
 | **FTB modpack URL** with a pinned FTB version ID | Supported through `TYPE=FTBA` and selected Java runtime; live verification pending |
-| Other Forge/NeoForge ServerPackCreator scripts or arbitrary installer scripts | Not supported |
+| Other Forge/NeoForge ServerPackCreator scripts or arbitrary installer scripts | Not supported; client exports with a valid manifest are installed without executing scripts |
 
 For Fabric ServerPackCreator packages, MineCraftDeployer reads `variables.txt`. It does **not** execute the uploaded `start.sh`, Java installer, or `JAVA_ARGS`: the configured RAM setting takes precedence. A specific CurseForge file/version URL is preferable to a generic modpack page when reproducibility matters.
 
 Server ZIP uploads are limited to **4 GiB compressed**, with limits on the number and expanded size of archive entries. A successfully uploaded profile may still fail during game startup if the mods/versions are incompatible.
+
+### Customized CurseForge client-export ZIPs — added mods included
+
+To install an unpublished or modified CurseForge profile, use **Share Profile → Export as ZIP** in the CurseForge app and upload the resulting ZIP through **OR server ZIP / customized CurseForge export ZIP** in the portal. Select the saved world's ZIP in **Optional saved world ZIP** if you want to continue an existing save. The existing world is copied into the new profile's `world/` folder (its original `level.dat`, regions, and player data are kept).
+
+A supported export has a root `manifest.json`, `manifestType: minecraftModpack`, valid Minecraft and primary Fabric/Forge/NeoForge/Quilt loader versions, positive CurseForge `projectID` / `fileID` references, and a safe overrides path. The portal validates the archive and stores the **original, unmodified ZIP** at `minecraft/.mcd/curseforge-pack.zip`, recording its SHA-256 and inferred Java runtime. There is no server-side download during the upload request. An uploaded profile remains offline until **Make Active**.
+
+At activation the container uses `TYPE=AUTO_CURSEFORGE`, `CF_SLUG=custom`, and `CF_MODPACK_ZIP=/data/.mcd/curseforge-pack.zip`. This is the official image's [unpublished-modpack install path](https://docker-minecraft-server.readthedocs.io/en/latest/types-and-platforms/mod-platforms/auto-curseforge/#unpublished-modpacks). It downloads exact referenced mod versions, handles the `overrides/` tree, installs the declared mod loader, and excludes client-only mods that CurseForge metadata or the image's exclusion rules identify. Optional mods remain optional as declared by your manifest. **It cannot guarantee that every mod works on a dedicated server**: miscategorized client-only mods may require `CF_EXCLUDE_MODS`, and files blocked from automatic downloads may need manual intervention. Check the Minecraft container logs for those details before switching if possible.
+
+For **Minecraft 26.3**, the launcher automatically selects **Java 25**; for Minecraft 1.20.5 through 1.21.x, Java 21; for 1.17 through 1.20.4, Java 17; older supported 1.16.x and below use Java 8. The selected runtime image (for 26.3, `itzg/minecraft-server:java25`) must already be pulled before activation, as the portal does not automatically pull images.
+
+The local export is intentionally pinned; restarting the same profile does not replace its manifest with the public pack's latest version. The original ZIP's hash and manifest are verified **before** stopping any running game when switching profiles. Existing FTB and ordinary server-ZIP installation modes are unchanged. Never upload an untrusted ZIP, and always use the world's matching modpack revision.
 
 ### Feed The Beast (FTB) modpack URL — no server ZIP needed
 
