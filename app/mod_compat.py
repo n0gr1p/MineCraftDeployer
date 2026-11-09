@@ -114,12 +114,12 @@ def environment(meta):
     env = {
         "CF_MODPACK_ZIP": "/data/.mcd/" + (EFFECTIVE if replacements else SOURCE),
         "MCD_MOD_REVISION": runtime_signature(meta),
+        # Re-evaluate excludes/includes also when a rule is *removed*.
+        # Without synchronization, the installer may leave the old server mod set.
+        "CF_FORCE_SYNCHRONIZE": "true",
     }
     if exclusions:
         env["CF_EXCLUDE_MODS"] = ",".join(exclusions)
-    if replacements or exclusions:
-        # The installer must reconcile stale mods after a version/exclusion change.
-        env["CF_FORCE_SYNCHRONIZE"] = "true"
     return env
 
 
