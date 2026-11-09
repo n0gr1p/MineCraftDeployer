@@ -1,4 +1,4 @@
-import fcntl, json, os, re, secrets, shutil, uuid, zipfile
+import fcntl, hashlib, json, os, re, secrets, shutil, uuid, zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
-from app.pack_import import prepare_pack
+from app.pack_import import inspect_curseforge_export, prepare_pack
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -248,6 +248,20 @@ def check_launch(meta):
         data=path_for(meta["id"])/"minecraft"
         if meta.get("pack_format")!="rlcraft-dregora" or meta.get("minecraft_version")!="1.12.2" or meta.get("loader_version")!="14.23.5.2860" or not (data/"SERVER README OR DIE.txt").is_file() or not (data/"mods").is_dir() or not (data/"config").is_dir():
             raise HTTPException(409,"The installed Dregora Forge server pack is missing or incompatible; activation cancelled")
+    if meta["mode"]=="curseforge_zip":
+        archive=path_for(meta["id"])/"minecraft"/".mcd"/"curseforge-pack.zip"
+        try:
+            if not archive.is_file() or archive.is_symlink():
+                raise ValueError("Uploaded CurseForge pack ZIP is missing")
+            detected=inspect_curseforge_export(archive)
+            if not detected or any(meta.get(key)!=value for key,value in detected.items()):
+                raise ValueError("Saved CurseForge profile does not match its ZIP manifest")
+            with archive.open("rb") as handle:
+                digest=hashlib.file_digest(handle,"sha256").hexdigest()
+            if digest!=meta.get("pack_sha256"):
+                raise ValueError("Uploaded CurseForge pack ZIP changed after installation")
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(409,f"Cannot activate custom CurseForge pack: {exc}") from exc
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
@@ -301,6 +315,12 @@ def get_or_create_container(meta):
                     "FTB_MODPACK_VERSION_ID":str(meta["ftb_version_id"])})
     elif meta["mode"]=="curseforge":
         env.update({"TYPE":"AUTO_CURSEFORGE","CF_PAGE_URL":meta["cf_url"]})
+        if CF_KEY: env["CF_API_KEY"]=CF_KEY
+    elif meta["mode"]=="curseforge_zip":
+        # Local unpublished client export is authoritative: exact mod file IDs,
+        # loader, and overrides come from the uploaded ZIP, not a public pack URL.
+        env.update({"TYPE":"AUTO_CURSEFORGE","CF_SLUG":"custom",
+                    "CF_MODPACK_ZIP":"/data/.mcd/curseforge-pack.zip"})
         if CF_KEY: env["CF_API_KEY"]=CF_KEY
     elif meta["mode"]=="fabric":
         env.update({"TYPE":"FABRIC",
@@ -484,7 +504,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
     if not re.fullmatch("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}",name): raise HTTPException(400,"Invalid server name")
     if not 2<=ram_gb<=MAX_RAM: raise HTTPException(400,"Invalid RAM allocation")
     if sum((bool(cf_url),bool(ftb_url),bool(pack)))!=1:
-        raise HTTPException(400,"Provide exactly one installation source: CurseForge URL, FTB URL, or server ZIP")
+        raise HTTPException(400,"Provide exactly one installation source: CurseForge URL, FTB URL, or ZIP (server pack or CurseForge export)")
     if ftb_url:
         try:
             ftb_pack_id=parse_ftb_url(ftb_url)
@@ -513,9 +533,19 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
         if pack:
             archive=root/"pack.zip"
             await save_upload(pack,archive)
-            safe_extract(archive,data)
-            archive.unlink()
-            detected=prepare_pack(data,safe_extract)
+            detected=inspect_curseforge_export(archive)
+            if detected:
+                # Keep the original export intact. The game image's official
+                # CurseForge helper downloads referenced mods and applies overrides.
+                location=data/".mcd"
+                location.mkdir()
+                archive.replace(location/"curseforge-pack.zip")
+                with (location/"curseforge-pack.zip").open("rb") as handle:
+                    detected["pack_sha256"]=hashlib.file_digest(handle,"sha256").hexdigest()
+            else:
+                safe_extract(archive,data)
+                archive.unlink()
+                detected=prepare_pack(data,safe_extract)
         if world:
             archive=root/"world.zip"
             await save_upload(world,archive)
@@ -526,7 +556,7 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             shutil.copytree(candidates[0].parent,data/(detected.get("world_name","world") if pack else "world"),dirs_exist_ok=True)
             shutil.rmtree(root/"import")
         meta={"id":sid,"name":name,"ram_gb":ram_gb,"cf_url":cf_url,
-              "mode":"ftb" if ftb_url else ("curseforge" if cf_url else "zip"),
+              "mode":"ftb" if ftb_url else ("curseforge" if cf_url else (detected["mode"] if pack else "zip")),
               "whitelist":whitelist,"ops":[]}
         if ftb_url:
             meta.update({"ftb_url":ftb_url,"ftb_modpack_id":ftb_pack_id,
