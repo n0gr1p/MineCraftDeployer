@@ -31,7 +31,7 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.mod-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
     .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
     .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
     .setting-field label{margin:0 0 6px;font-size:.9rem}
@@ -54,6 +54,13 @@
     .player-line strong{margin-right:auto;word-break:break-word}
     .player-panel input{max-width:260px}
     .player-panel button{font-size:.88rem;padding:7px 10px}
+    .mod-panel label{font-size:.88rem}
+    .mod-panel .mod-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:8px 12px}
+    .mod-panel .mod-form-grid label{margin:4px 0}
+    .mod-panel .mod-form-grid input,.mod-panel .mod-form-grid select{margin-top:5px}
+    .mod-entry{border:1px solid #46606a;border-radius:9px;padding:12px;margin-top:10px}
+    .mod-warning{padding:10px;border-left:3px solid #ffd991;background:#2a2b30;margin-top:10px}
+    .mod-notice{margin:8px 0;color:#ffd991;font-size:.88rem}
     .player-panel .help{margin:8px 0}
 
     .tag{font-size:.75rem;padding:4px 9px;border-radius:20px;color:#a3ecc0;background:#264c3d;border:1px solid #4b8868}
@@ -138,7 +145,8 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openModId=null;
+    const modInfo={};
     const consoleOutputs={};
     const $=id=>document.getElementById(id);
     async function request(path,options={}){
@@ -153,7 +161,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton')){
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.modButton')){
         const confirmation=btn.closest('.delete-panel')?.querySelector('input');
         btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
       }
@@ -515,6 +523,150 @@
       }
       panel.append(list);return panel;
     }
+
+    async function loadModInfo(s){
+      if(busy)return;
+      setBusy(true);message('Inspecting saved mod manifest and recent startup logs…');
+      try{
+        modInfo[s.id]=await request('/servers/'+s.id+'/mods');
+        message('Mod compatibility details loaded.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    async function saveModChanges(s,changes){
+      if(busy)return;
+      setBusy(true);message('Saving mod compatibility rules (Minecraft will not restart)…');
+      try{
+        await request('/servers/'+s.id+'/mods',{
+          method:'PUT',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({changes})
+        });
+        modInfo[s.id]=await request('/servers/'+s.id+'/mods');
+        await refresh(true);
+        message('Rules saved. Server-side mod changes apply on the next game restart; check the client update notices.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function modPanel(s){
+      const panel=document.createElement('div');
+      panel.className='mod-panel';panel.hidden=openModId!==s.id;
+      if(panel.hidden)return panel;
+      const intro=document.createElement('p');intro.className='help muted';
+      intro.textContent='For custom CurseForge exports only. Keep the uploaded ZIP unchanged; use verified CurseForge project/file IDs. Saving never restarts Minecraft. Replacements can require a corresponding update to every player’s client.';
+      panel.append(intro);
+      if(s.mod_changes_pending){
+        const pending=document.createElement('p');pending.className='mod-warning';
+        pending.textContent='Server mod changes saved but not yet applied. Restart this game when players are ready to disconnect. Client updates should be installed before rejoining.';
+        panel.append(pending);
+      }
+      const info=modInfo[s.id];
+      if(!info){
+        const load=actionButton('Load mod details and startup diagnostics','secondary',()=>loadModInfo(s));
+        load.classList.add('modButton');
+        panel.append(load);return panel;
+      }
+      const reread=actionButton('Refresh diagnostics','secondary',()=>loadModInfo(s));
+      reread.classList.add('modButton');panel.append(reread);
+      if(info.diagnostic){
+        const diagnostic=document.createElement('div');diagnostic.className='mod-warning';
+        const head=document.createElement('strong');head.textContent='Startup diagnostic — '+(info.diagnostic.mod||'unknown mod');
+        const explanation=document.createElement('p');explanation.textContent=info.diagnostic.message;
+        const guidance=document.createElement('small');guidance.textContent=info.diagnostic.guidance;
+        diagnostic.append(head,explanation,guidance);panel.append(diagnostic);
+      }else{
+        const note=document.createElement('p');note.className='muted help';
+        note.textContent='No recognizable startup error in the recent logs. This does not guarantee every mod is server-compatible.';
+        panel.append(note);
+      }
+      const header=document.createElement('h3');header.textContent='Saved compatibility rules';
+      panel.append(header);
+      if(!info.changes.length){
+        const empty=document.createElement('p');empty.className='muted help';
+        empty.textContent='None. The server currently uses the source export and built-in CurseForge client-only mod filtering.';
+        panel.append(empty);
+      }
+      for(const change of info.changes){
+        const entry=document.createElement('div');entry.className='mod-entry';
+        const line=document.createElement('strong');
+        line.textContent=change.name+' — '+change.action+' (project '+change.project_id+')';
+        entry.append(line);
+        const details=document.createElement('p');details.className='help';
+        details.textContent=change.action==='replace'?'Server file ID '+change.replacement_file_id+'; original file ID '+info.original_mods[change.project_id]:
+          change.action==='exclude'?'Excluded from the dedicated server, not automatically removed from players’ clients':
+          'Player-facing compatibility notice only (no server files changed)';
+        entry.append(details);
+        if(change.client_update_required){
+          const warning=document.createElement('p');warning.className='mod-notice';
+          warning.textContent='Players must update '+change.name+
+            (change.client_version?' from '+change.client_version:'')+
+            (change.server_version?' to '+change.server_version:'')+
+            (change.action==='replace'?' (CurseForge file ID '+change.replacement_file_id+')':'')+'.';
+          entry.append(warning);
+        }
+        if(change.reason){
+          const reason=document.createElement('p');reason.className='help muted';reason.textContent=change.reason;entry.append(reason);
+        }
+        const remove=actionButton('Remove this rule','danger',()=>{
+          if(confirm('Remove the saved rule for '+change.name+'? The change applies after the next game restart.'))
+            saveModChanges(s,info.changes.filter(c=>c.project_id!==change.project_id));
+        });
+        remove.classList.add('modButton');entry.append(remove);panel.append(entry);
+      }
+      const form=document.createElement('form');form.className='mod-entry';
+      const heading=document.createElement('strong');heading.textContent='Add a compatibility rule';
+      form.append(heading);
+      const grid=document.createElement('div');grid.className='mod-form-grid';
+      function field(labelText,type,options={}){
+        const label=document.createElement('label');label.textContent=labelText;
+        const input=document.createElement('input');input.type=type;
+        Object.assign(input,options);label.append(input);grid.append(label);return input;
+      }
+      const project=field('CurseForge project ID','number',{min:'1',required:true,placeholder:'257814'});
+      const name=field('Mod name','text',{required:true,maxLength:120,placeholder:'CreativeCore'});
+      const actionLabel=document.createElement('label');actionLabel.textContent='Server action';
+      const action=document.createElement('select');
+      for(const [value,description] of [
+        ['replace','Replace pinned mod file'],
+        ['exclude','Exclude from server'],
+        ['notice','Player update notice only']
+      ]){const opt=document.createElement('option');opt.value=value;opt.textContent=description;action.append(opt)}
+      actionLabel.append(action);grid.append(actionLabel);
+      const replacement=field('New CurseForge file ID','number',{min:'1',placeholder:'9009764'});
+      const from=field('Old client version (optional)','text',{maxLength:80,placeholder:'2.14.16'});
+      const to=field('Required client version (optional)','text',{maxLength:80,placeholder:'2.14.18'});
+      const reason=field('Reason / troubleshooting note','text',{maxLength:160,placeholder:'Dedicated-server crash fix'});
+      const checkboxLabel=document.createElement('label');checkboxLabel.textContent='Notify players to update their client';
+      const clientUpdate=document.createElement('input');clientUpdate.type='checkbox';clientUpdate.checked=true;
+      checkboxLabel.append(clientUpdate);grid.append(checkboxLabel);
+      function syncAction(){
+        replacement.disabled=action.value!=='replace';
+        replacement.required=action.value==='replace';
+        if(action.value==='notice'){clientUpdate.checked=true;clientUpdate.disabled=true}
+        else {clientUpdate.disabled=false;clientUpdate.checked=action.value==='replace'}
+      }
+      action.addEventListener('change',syncAction);syncAction();
+      form.append(grid);
+      const submit=document.createElement('button');submit.type='submit';submit.textContent='Save new rule';
+      form.append(submit);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const entry={
+          project_id:Number(project.value),name:name.value.trim(),action:action.value,
+          client_update_required:clientUpdate.checked,
+          client_version:from.value.trim(),server_version:to.value.trim(),
+          reason:reason.value.trim()
+        };
+        if(action.value==='replace')entry.replacement_file_id=Number(replacement.value);
+        const updated=info.changes.filter(c=>c.project_id!==entry.project_id);
+        if(updated.length!==info.changes.length&&!confirm('Replace existing rule for this project ID?'))return;
+        saveModChanges(s,[...updated,entry]);
+      };
+      panel.append(form);
+      const footer=document.createElement('p');footer.className='help muted';
+      footer.textContent='The portal does not automatically determine a safe mod upgrade or prove client/server compatibility. Verify the file ID and release first. Rules are persistent; remove one above to revert it at the next restart.';
+      panel.append(footer);
+      return panel;
+    }
     function paint(){
       const selectedBefore=$('serverSelect').value;
       const current=active();
@@ -567,6 +719,28 @@
         settingsBtn.classList.add('settingsButton');
         settingsBtn.setAttribute('aria-expanded',String(openSettingsId===s.id));
         box.append(settingsBtn);
+        if(s.mode==='curseforge_zip'){
+          const modBtn=actionButton('Mods & compatibility','secondary',()=>{
+            openModId=openModId===s.id?null:s.id;
+            paint();
+            if(openModId===s.id&&!modInfo[s.id])loadModInfo(s);
+          });
+          modBtn.classList.add('modButton');
+          modBtn.setAttribute('aria-expanded',String(openModId===s.id));
+          box.append(modBtn);
+          if(s.client_updates?.length){
+            const notice=document.createElement('p');notice.className='mod-notice';
+            notice.textContent='Client updates needed: '+s.client_updates.map(x=>x.name+
+              (x.server_version?' → '+x.server_version:x.required_file_id?' → CurseForge file '+x.required_file_id:'')).join(', ')+
+              '. Open Mods & compatibility for details.';
+            box.append(notice);
+          }
+          if(s.mod_changes_pending){
+            const pending=document.createElement('p');pending.className='mod-warning';
+            pending.textContent='Server mod changes pending next restart.';
+            box.append(pending);
+          }
+        }
         const consoleBtn=actionButton('Console','secondary',()=>{
           openConsoleId=openConsoleId===s.id?null:s.id;paint();
         });
@@ -583,6 +757,7 @@
           box.append(deleteBtn);
         }
         box.append(playerPanel(s),ramPanel(s),settingsPanel(s),consolePanel(s));
+        if(s.mode==='curseforge_zip')box.append(modPanel(s));
         if(deletable)box.append(deletePanel(s));
         area.append(box);
       }
