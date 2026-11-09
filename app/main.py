@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 from app.pack_import import inspect_curseforge_export, prepare_pack
+from app import mod_compat
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -262,6 +263,11 @@ def check_launch(meta):
                 raise ValueError("Uploaded CurseForge pack ZIP changed after installation")
         except (ValueError,OSError,zipfile.BadZipFile) as exc:
             raise HTTPException(409,f"Cannot activate custom CurseForge pack: {exc}") from exc
+    if meta["mode"]=="curseforge_zip":
+        try:
+            mod_compat.validate_effective(path_for(meta["id"]), meta)
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(409,f"Mod compatibility check failed: {exc}") from exc
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
@@ -281,7 +287,10 @@ def get_or_create_container(meta):
         existing_limit=c.attrs.get("HostConfig",{}).get("Memory")
         ram_mismatch=(existing_heap!=f"{requested_ram}G"
                       or existing_limit!=(requested_ram+1)*1024**3)
-        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch or settings_pending(c,meta):
+        mod_mismatch=bool(meta["mode"]=="curseforge_zip" and
+            (minecraft_env(c).get("MCD_MOD_REVISION") not in
+                (mod_compat.runtime_signature(meta), None if not mod_compat.runtime_changes(meta) else "")))
+        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch or settings_pending(c,meta) or mod_mismatch:
             # Recreate on changed port, incompatible options, or changed RAM/heap.
             # /data is a bind mount. Removing the game container does not delete game files.
             c.update(restart_policy={"Name":"no"})
@@ -319,8 +328,8 @@ def get_or_create_container(meta):
     elif meta["mode"]=="curseforge_zip":
         # Local unpublished client export is authoritative: exact mod file IDs,
         # loader, and overrides come from the uploaded ZIP, not a public pack URL.
-        env.update({"TYPE":"AUTO_CURSEFORGE","CF_SLUG":"custom",
-                    "CF_MODPACK_ZIP":"/data/.mcd/curseforge-pack.zip"})
+        env.update({"TYPE":"AUTO_CURSEFORGE","CF_SLUG":"custom"})
+        env.update(mod_compat.environment(meta))
         if CF_KEY: env["CF_API_KEY"]=CF_KEY
     elif meta["mode"]=="fabric":
         env.update({"TYPE":"FABRIC",
@@ -487,6 +496,12 @@ def state(meta):
             "loader_version":meta.get("loader_version"),
             "loader_type":meta.get("loader_type"),
             "mod_count":meta.get("mod_count"),
+            "mod_change_count":len(meta.get("mod_changes",[])),
+            "client_updates":mod_compat.client_notices(meta) if meta.get("mode")=="curseforge_zip" else [],
+            "mod_changes_pending":bool(meta.get("mode")=="curseforge_zip" and c and
+                (minecraft_env(c).get("MCD_MOD_REVISION") not in
+                    (mod_compat.runtime_signature(meta),
+                     None if not mod_compat.runtime_changes(meta) else ""))),
             "java_version":meta.get("java_version",21),
             "ftb_modpack_id":meta.get("ftb_modpack_id"),
             "ftb_version_id":meta.get("ftb_version_id"),
@@ -570,6 +585,57 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
+
+class ModChanges(BaseModel):
+    # Treat each entry as a complete desired plan; validate all entries against
+    # the exact uploaded manifest before replacing durable metadata.
+    changes:list[dict]
+
+
+@app.get("/api/servers/{sid}/mods")
+def get_mod_compatibility(sid:str,authorization:str|None=Header(None)):
+    auth(authorization)
+    meta=meta_for(sid)
+    if meta.get("mode")!="curseforge_zip":
+        raise HTTPException(409,"Mod compatibility controls require a custom CurseForge ZIP profile")
+    try:
+        original=mod_compat.verified_source(path_for(sid),meta)
+        manifest=mod_compat.source_manifest(original)
+    except (ValueError,OSError,zipfile.BadZipFile) as exc:
+        raise HTTPException(409,f"Cannot inspect original modpack: {exc}") from exc
+    base={entry["projectID"]:entry["fileID"] for entry in manifest["files"]}
+    notices=mod_compat.client_notices(meta)
+    for notice in notices:
+        notice["original_file_id"]=base.get(notice["project_id"])
+    c=container_for(sid)
+    diagnostic=None
+    if c and hasattr(c,"logs"):
+        try:
+            diagnostic=mod_compat.diagnostics(c.logs(tail=400))
+        except docker.errors.DockerException:
+            pass
+    return {"original_mods":base,"changes":meta.get("mod_changes",[]),
+            "client_updates":notices,"diagnostic":diagnostic,
+            "restart_required":state(meta)["mod_changes_pending"]}
+
+
+@app.put("/api/servers/{sid}/mods")
+def set_mod_compatibility(sid:str,change:ModChanges,
+                          authorization:str|None=Header(None)):
+    auth(authorization)
+    with deployment_lock():
+        meta=meta_for(sid)
+        if meta.get("mode")!="curseforge_zip":
+            raise HTTPException(409,"Mod compatibility controls require a custom CurseForge ZIP profile")
+        try:
+            clean=mod_compat.generate_effective(path_for(sid),meta,change.changes)
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(400,str(exc)) from exc
+        meta["mod_changes"]=clean
+        write_meta(meta)
+        # Saving never restarts Minecraft. Startup and restart apply changes.
+        return state(meta)
+
 
 class DeleteServerConfirmation(BaseModel):
     confirm_name:str
