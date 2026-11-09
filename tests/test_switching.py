@@ -1316,3 +1316,207 @@ def test_custom_curseforge_zip_with_traversal_is_rejected(environment):
     assert "Unsafe" in response.json()["detail"]
     assert not list(portal.ROOT.glob("*/meta.json"))
 
+
+
+def install_custom_mod_profile(environment, version="26.3"):
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Family Modpack","ram_gb":"8","players":"TestPlayer"},
+            files={"pack":("custom.zip",custom_curseforge_export(version=version),"application/zip")})
+    assert response.status_code==200,response.text
+    return response.json()["id"]
+
+
+def test_mod_patch_preserves_original_zip_and_shows_client_update_notice(environment):
+    sid=install_custom_mod_profile(environment)
+    location=portal.ROOT/sid/"minecraft"/".mcd"
+    original=(location/"curseforge-pack.zip").read_bytes()
+    replacement={
+        "project_id":606989,"action":"replace","replacement_file_id":9009764,
+        "name":"CreativeCore","client_version":"2.14.16","server_version":"2.14.18",
+        "reason":"Fix dedicated-server rendering mixin","client_update_required":True
+    }
+    with TestClient(portal.app) as http:
+        headers={"Authorization":"Bearer "+portal.TOKEN}
+        before=http.get(f"/api/servers/{sid}/mods",headers=headers)
+        assert before.status_code==200,before.text
+        assert before.json()["original_mods"]["606989"]==9018522
+        response=http.put(f"/api/servers/{sid}/mods",headers=headers,json={"changes":[replacement]})
+        assert response.status_code==200,response.text
+        assert response.json()["client_updates"][0]["name"]=="CreativeCore"
+        assert not environment.containers.creations
+        details=http.get(f"/api/servers/{sid}/mods",headers=headers).json()
+    assert details["client_updates"][0]["original_file_id"]==9018522
+    assert details["client_updates"][0]["required_file_id"]==9009764
+    assert details["client_updates"][0]["server_version"]=="2.14.18"
+    assert details["restart_required"] is False  # Offline profile, no game to restart.
+    assert (location/"curseforge-pack.zip").read_bytes()==original
+    effective=location/"curseforge-effective.zip"
+    with zipfile.ZipFile(effective) as archive:
+        manifest=json.loads(archive.read("manifest.json"))
+        ids={item["projectID"]:item["fileID"] for item in manifest["files"]}
+        assert ids[606989]==9009764
+        assert ids[699872]==8920440
+        assert archive.read("overrides/config/custom-settings.json")==b'{"custom":true}'
+    portal.activate(sid)
+    new=environment.containers.creations[-1]["environment"]
+    assert new["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-effective.zip"
+    assert new["CF_FORCE_SYNCHRONIZE"]=="true"
+    assert "CF_EXCLUDE_MODS" not in new
+    assert new["MCD_MOD_REVISION"]
+    assert environment.containers.items[sid].status=="running"
+    assert portal.state(portal.meta_for(sid))["mod_changes_pending"] is False
+
+
+def test_mod_changes_saved_without_interrupting_running_game_apply_on_restart(environment):
+    sid=install_custom_mod_profile(environment)
+    portal.activate(sid)
+    old=environment.containers.items[sid]
+    old_env=environment.containers.creations[-1]["environment"]
+    with TestClient(portal.app) as http:
+        result=http.put(f"/api/servers/{sid}/mods",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            json={"changes":[{"project_id":606989,"name":"CreativeCore","action":"replace",
+                              "replacement_file_id":9009764,
+                              "client_version":"2.14.16","server_version":"2.14.18"}]})
+        assert result.status_code==200,result.text
+        assert result.json()["mod_changes_pending"] is True
+        assert result.json()["client_updates"][0]["name"]=="CreativeCore"
+    assert old.status=="running"  # No stop/recreate while changing the rules.
+    assert environment.containers.items[sid] is old
+    assert old_env["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-pack.zip"
+    assert len(environment.containers.creations)==1
+    portal.restart_active(sid)
+    assert old not in environment.containers.items.values()
+    assert environment.containers.creations[-1]["environment"]["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-effective.zip"
+    assert portal.state(portal.meta_for(sid))["mod_changes_pending"] is False
+
+
+def test_mod_exclusion_and_user_notice_are_persisted(environment):
+    sid=install_custom_mod_profile(environment)
+    original=(portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-pack.zip").read_bytes()
+    changes=[
+        {"project_id":699872,"name":"Client Rendering Mod","action":"exclude",
+         "reason":"Not safe on dedicated server","client_update_required":False},
+        {"project_id":606989,"name":"CreativeCore","action":"notice",
+         "client_version":"2.14.16","server_version":"2.14.18",
+         "reason":"The owner already repaired the server ZIP","client_update_required":True},
+    ]
+    with TestClient(portal.app) as http:
+        response=http.put(f"/api/servers/{sid}/mods",json={"changes":changes},
+                          headers={"Authorization":"Bearer "+portal.TOKEN})
+        assert response.status_code==200,response.text
+        assert len(response.json()["client_updates"])==1
+        assert response.json()["client_updates"][0]["name"]=="CreativeCore"
+    assert (portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-pack.zip").read_bytes()==original
+    assert not (portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-effective.zip").exists()
+    portal.activate(sid)
+    env=environment.containers.creations[-1]["environment"]
+    assert env["CF_EXCLUDE_MODS"]=="699872"
+    assert env["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-pack.zip"
+    assert env["CF_FORCE_SYNCHRONIZE"]=="true"
+    assert portal.meta_for(sid)["mod_changes"]==changes
+
+
+def test_remove_mod_compatibility_rule_restores_source_manifest_on_restart(environment):
+    sid=install_custom_mod_profile(environment)
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        assert http.put(f"/api/servers/{sid}/mods",headers=auth,
+            json={"changes":[{"project_id":606989,"name":"CreativeCore","action":"replace",
+                "replacement_file_id":9009764}]}).status_code==200
+        portal.activate(sid)
+        old=environment.containers.items[sid]
+        restored=http.put(f"/api/servers/{sid}/mods",headers=auth,json={"changes":[]})
+        assert restored.status_code==200,restored.text
+        assert restored.json()["mod_changes_pending"] is True
+        assert restored.json()["client_updates"]==[]
+        assert old.status=="running"
+    portal.restart_active(sid)
+    assert environment.containers.creations[-1]["environment"]["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-pack.zip"
+    assert "CF_EXCLUDE_MODS" not in environment.containers.creations[-1]["environment"]
+
+
+@pytest.mark.parametrize("change",[
+    {"project_id":1234567,"name":"Unknown","action":"replace","replacement_file_id":9009764},
+    {"project_id":606989,"name":"Wrong ID","action":"replace","replacement_file_id":0},
+    {"project_id":606989,"name":"Oops","action":"replace","replacement_file_id":"9009764"},
+    {"project_id":606989,"name":"Oops","action":"exclude","client_update_required":"yes"},
+    {"project_id":606989,"name":"Oops","action":"notice","client_update_required":False},
+    {"project_id":606989,"name":"Oops","action":"remove"},
+])
+def test_bad_mod_override_is_rejected_without_changing_saved_profile(environment,change):
+    sid=install_custom_mod_profile(environment)
+    before=portal.meta_for(sid)
+    with TestClient(portal.app) as http:
+        response=http.put(f"/api/servers/{sid}/mods",headers={"Authorization":"Bearer "+portal.TOKEN},
+                          json={"changes":[change]})
+    assert response.status_code==400,response.text
+    assert portal.meta_for(sid)==before
+    assert not (portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-effective.zip").exists()
+
+
+def test_mod_compatibility_rejects_duplicate_project_edits(environment):
+    sid=install_custom_mod_profile(environment)
+    with TestClient(portal.app) as http:
+        result=http.put(f"/api/servers/{sid}/mods",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            json={"changes":[{"project_id":606989,"name":"First","action":"exclude"},
+                             {"project_id":606989,"name":"Second","action":"notice"}]})
+    assert result.status_code==400
+    assert "unique project ID" in result.json()["detail"]
+
+
+def test_mod_compatibility_api_requires_auth_and_custom_export(environment):
+    sid=install_custom_mod_profile(environment)
+    normal=install_profile(portal.ROOT,123)
+    with TestClient(portal.app) as http:
+        assert http.get(f"/api/servers/{sid}/mods").status_code==401
+        assert http.put(f"/api/servers/{sid}/mods",json={"changes":[]}).status_code==401
+        assert http.get(f"/api/servers/{normal}/mods",
+                        headers={"Authorization":"Bearer "+portal.TOKEN}).status_code==409
+
+
+def test_tampered_derived_curseforge_zip_cannot_switch_away_from_playable_server(environment):
+    old=install_profile(portal.ROOT,124)
+    portal.activate(old)
+    sid=install_custom_mod_profile(environment)
+    with TestClient(portal.app) as http:
+        response=http.put(f"/api/servers/{sid}/mods",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            json={"changes":[{"project_id":606989,"name":"CreativeCore","action":"replace",
+                              "replacement_file_id":9009764}]})
+        assert response.status_code==200,response.text
+    archive=portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-effective.zip"
+    with zipfile.ZipFile(archive,"a") as file:
+        manifest=json.loads(file.read("manifest.json"))
+        manifest["files"][0]["fileID"]=999999
+        file.writestr("manifest.json",json.dumps(manifest))
+    with pytest.raises(HTTPException) as exc:
+        portal.activate(sid)
+    assert exc.value.status_code==409
+    assert "Effective CurseForge ZIP" in exc.value.detail
+    assert environment.containers.items[old].status=="running"
+    assert portal.active_id()==old
+
+
+def test_fabric_client_rendering_mixin_diagnostic_is_actionable_and_not_overconfident():
+    from app.mod_compat import diagnostics
+    excerpt="""[init] Running as uid=1000 gid=1000
+[main/ERROR]: @Mixin target net.minecraft.client.renderer.GameRenderer was not found creativecore.fabric.mixins.json:GameRendererMixin from mod creativecore
+[main/ERROR]: A mod crashed on startup!
+"""
+    issue=diagnostics(excerpt)
+    assert issue["kind"]=="missing-client-class"
+    assert issue["mod"]=="creativecore"
+    assert "client-only" in issue["message"]
+    assert "cannot select a safe replacement" in issue["guidance"]
+    assert diagnostics(excerpt+"[01:43:07] [Server thread/INFO]: Done (0.409s)! For help, type \"help\"") is None
+
+
+def test_diagnostic_returns_none_without_evidence_of_mod_failure():
+    from app.mod_compat import diagnostics
+    assert diagnostics("[init] Running as uid=1000 gid=1000\nModpack ready") is None
+    assert diagnostics("[init] Running as uid=1000 gid=1000\nMinecraft server failed.")["kind"]=="startup-failure"
+
