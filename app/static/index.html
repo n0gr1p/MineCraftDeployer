@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MineCraftDeployer · Family Server Portal</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0c1420;color:#e8f3ef}
+    *{box-sizing:border-box}
+    body{max-width:1120px;margin:0 auto;padding:30px 20px}
+    h1{margin:0;color:#9beab0;font-size:2rem}
+    h2{margin:0 0 12px;font-size:1.25rem}
+    p{line-height:1.5}
+    .muted,small{color:#b4c9c9}
+    .layout{display:grid;grid-template-columns:minmax(270px,360px) 1fr;gap:18px}
+    .panel{padding:22px;border-radius:16px;background:#192733;border:1px solid #36505f;margin-top:18px}
+    .highlight{background:#1b332f;border-color:#3e8b68}
+    label{display:block;margin-top:16px;margin-bottom:6px;font-weight:600}
+    input,select{display:block;width:100%;padding:11px 12px;color:white;background:#0d1b28;border:1px solid #5a7380;border-radius:8px;font:inherit}
+    input[type=file]{font-size:13px}
+    button{padding:10px 14px;margin:8px 8px 0 0;border:1px solid transparent;border-radius:9px;background:#8ae5a8;color:#0a1d14;font-weight:700;cursor:pointer;font:inherit}
+    button:hover:not(:disabled){filter:brightness(1.1)}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    button.secondary{background:#203641;color:#e9f9f2;border-color:#4c6b74}
+    button.danger{background:#ffdbb0;color:#372016}
+    .status{min-height:1.2em;color:#ffd991;white-space:pre-wrap}
+    [hidden]{display:none!important}
+    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .row>*{flex:none}
+    .row select{flex:1;min-width:185px}
+    .server{border-top:1px solid #46606a;padding:15px 0}
+    .server:first-child{border-top:0}
+    .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.backup-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
+    .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
+    .setting-field label{margin:0 0 6px;font-size:.9rem}
+    .setting-field select,.setting-field input{width:100%;margin:0}
+    .setting-field input[type=checkbox]{width:auto;height:19px;min-width:19px}
+    .setting-field .toggle-line{display:flex;align-items:center;gap:9px}
+    .setting-field small{display:block;margin-top:6px;line-height:1.35}
+    .setting-field.disabled{opacity:.65}
+    .console-panel input{flex:1;min-width:200px}
+    .console-panel pre{max-height:220px;margin-top:10px}
+    .delete-panel{border-color:#bc735c}
+    .delete-panel input{max-width:320px}
+    .delete-panel button{margin-top:10px}
+    .delete-panel label{margin:0}
+    .ram-panel input{max-width:125px}
+    .ram-panel label{margin:0}
+    .ram-panel .help{margin:8px 0}
+    .player-line{padding:8px 0;border-bottom:1px solid #36505f;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .player-line:last-child{border-bottom:0}
+    .player-line strong{margin-right:auto;word-break:break-word}
+    .player-panel input{max-width:260px}
+    .player-panel button{font-size:.88rem;padding:7px 10px}
+    .player-panel .help{margin:8px 0}
+
+    .tag{font-size:.75rem;padding:4px 9px;border-radius:20px;color:#a3ecc0;background:#264c3d;border:1px solid #4b8868}
+    .tag.off{color:#d7e0e0;background:#263a42;border-color:#52666b}
+    pre{overflow:auto;max-height:320px;white-space:pre-wrap;background:#0a1723;padding:16px;border-radius:9px}
+    .help{font-size:.84rem}
+    #session{max-width:480px}
+    @media(max-width:790px){.layout{display:block}body{padding:18px 12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⛏ MineCraftDeployer</h1>
+    <p class="muted">Install as many packs as you like. Play on one server at a time — always the same join address.</p>
+  </header>
+  <section id="session" class="panel">
+    <label for="token">Portal access token</label>
+    <div class="row">
+      <input id="token" type="password" autocomplete="off" placeholder="Paste the family portal token">
+      <button id="connect">Connect</button>
+    </div>
+    <p class="help muted">Kept in this browser tab only.</p>
+  </section>
+  <section class="panel highlight">
+    <h2>Active Minecraft server</h2>
+    <p id="activeSummary">Connect to view your servers.</p>
+    <p id="joinAddress" class="muted"></p>
+    <div class="row">
+      <select id="serverSelect" aria-label="Select an installed Minecraft server"></select>
+      <button id="activate" disabled>Make Active</button>
+    </div>
+    <p class="help muted">Switching saves/stops the old game before starting the new one. Worlds and modpacks stay installed. Friends keep using the same game address and port.</p>
+    <div id="activeControls" class="row" hidden>
+      <button id="start" class="secondary">Start</button>
+      <button id="stop" class="danger">Stop</button>
+      <button id="restart" class="secondary">Restart</button>
+    </div>
+  </section>
+  <main class="layout">
+    <section class="panel">
+      <h2>Install a new server</h2>
+      <form id="create">
+        <label for="name">Server name</label>
+        <input id="name" name="name" required maxlength="40" placeholder="Our Friends World">
+        <label for="players">Allowed Minecraft Java player names</label>
+        <input id="players" name="players" required placeholder="DaughterName, FriendName" spellcheck="false" autocomplete="off">
+        <p class="muted help">Required for the internet-accessible game. Comma-separated Minecraft Java usernames (not Xbox gamertags).</p>
+        <label for="ram">RAM (GB)</label>
+        <input id="ram" name="ram_gb" type="number" min="2" max="12" value="6">
+        <p class="muted help">Choose <strong>one</strong> source: CurseForge URL, FTB URL, or server ZIP.</p>
+        <label for="cfUrl">CurseForge modpack URL</label>
+        <input id="cfUrl" name="cf_url" type="url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
+        <label for="ftbUrl">OR Feed The Beast (FTB) modpack URL</label>
+        <input id="ftbUrl" name="ftb_url" type="url" placeholder="https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2">
+        <div id="ftbOptions" hidden>
+          <label for="ftbVersion">FTB version ID (required; pins the modpack)</label>
+          <input id="ftbVersion" name="ftb_version_id" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="100566 (Evolution 2 v1.4.0)">
+          <p class="muted help">Get the numeric ID from the FTB modpack's Versions tab, e.g. 100566 for Evolution 2 v1.4.0. Pinning avoids unintended upgrades when restarting Minecraft.</p>
+          <label for="ftbJava">Java runtime required by the modpack</label>
+          <select id="ftbJava" name="ftb_java_version">
+            <option value="25" selected>Java 25 — FTB Evolution 2</option>
+            <option value="21">Java 21</option>
+            <option value="17">Java 17</option>
+            <option value="8">Java 8 — older FTB packs</option>
+          </select>
+          <p class="muted help">FTB lists the required Java version under Requirements on the modpack page. Minecraft runs in Docker; no Java installation on Ubuntu needed.</p>
+        </div>
+        <label for="pack">OR ready-to-run server ZIP</label>
+        <input id="pack" name="pack" type="file" accept=".zip">
+        <label for="world">Optional saved world ZIP</label>
+        <input id="world" name="world" type="file" accept=".zip">
+        <p class="muted help">FTB URLs are installed automatically by the official FTB installer when first activated; a version ID pins the exact release. ZIP uploads support ready-to-run server.jar ZIPs, Fabric ServerPackCreator and RLCraft Dregora (Java 8 / OTG). World ZIPs require exactly one level.dat. Profiles install offline: choose Make Active when ready to play.</p>
+        <button type="submit">Install Server</button>
+      </form>
+    </section>
+    <section class="panel">
+      <div class="row"><h2>Installed servers</h2><button id="refresh" class="secondary">Refresh</button></div>
+      <div id="servers"></div>
+      <h2>Server logs</h2>
+      <pre id="logs">Choose Logs on an installed server.</pre>
+    </section>
+  </main>
+  <p id="status" class="status" role="status"></p>
+  <script>
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openBackupId=null;
+    const backupListings={},backupErrors={};
+    const consoleOutputs={};
+    const $=id=>document.getElementById(id);
+    async function request(path,options={}){
+      const response=await fetch('/api'+path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});
+      const body=await response.json();
+      if(!response.ok)throw Error(typeof body.detail==='string'?body.detail:JSON.stringify(body.detail||response.status));
+      return body;
+    }
+    function active(){return servers.find(s=>s.is_active)}
+    function message(text){$('status').textContent=text}
+    function setBusy(value){
+      busy=value;
+      for(const id of ['activate','start','stop','restart','refresh'])
+        $(id).disabled=value;
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.backupButton')){
+        const confirmation=btn.closest('.delete-panel')?.querySelector('input');
+        btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
+      }
+    }
+    async function doAction(id,cmd,purpose=''){
+      if(busy||!id)return;
+      setBusy(true);
+      message(purpose==='enableplayers'?'Restarting Minecraft to enable player management…':cmd==='activate'?'Switching servers (waiting for world to save and stop)…':cmd+'…');
+      try{
+        await request('/servers/'+id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:cmd})});
+        message(purpose==='enableplayers'?'Player management enabled. Wait for Minecraft to finish starting before editing players.':cmd==='activate'?'Server selected. Minecraft may still be starting; check logs.':'Done.');
+        await refresh(true);
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    async function doPlayerAction(sid,action,name){
+      if(busy)return;
+      setBusy(true);message('Updating '+name+'…');
+      try{
+        await request('/servers/'+sid+'/players',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,username:name})});
+        await refresh(true);
+        message('Updated '+name+'.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    async function saveRam(s,ram){
+      if(busy)return;
+      const willRestart=['running','restarting','paused'].includes(s.status);
+      if(willRestart&&!confirm(
+        'Changing '+s.name+' RAM from '+s.ram_gb+' GB to '+ram+
+        ' GB requires stopping and recreating the Minecraft game container. '+
+        'Connected players will be disconnected. Continue?'
+      ))return;
+      setBusy(true);
+      message(willRestart?'Saving RAM and restarting '+s.name+'…':'Saving RAM for '+s.name+'…');
+      try{
+        await request('/servers/'+s.id+'/ram',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ram_gb:ram,restart_running:willRestart})
+        });
+        await refresh(true);
+        openRamId=null;
+        message(willRestart?'RAM updated. Minecraft is restarting; wait for the ready message in Logs.':
+                         'RAM saved. The new allocation will apply the next time this server starts.');
+      }catch(error){
+        message(error.message);
+        await refresh(true);
+      }finally{setBusy(false);paint()}
+    }
+    function ramPanel(s){
+      const panel=document.createElement('div');
+      panel.className='ram-panel';panel.hidden=openRamId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      intro.textContent='Set Minecraft heap memory, between 2 and '+s.max_ram_gb+
+        ' GB. The Docker container uses roughly 1 GB more for overhead.';
+      panel.append(intro);
+      const form=document.createElement('form');form.className='row';
+      const label=document.createElement('label');label.textContent='RAM (GB)';
+      const input=document.createElement('input');
+      input.type='number';input.min=2;input.max=s.max_ram_gb;input.step=1;
+      input.value=s.ram_gb;input.required=true;
+      const inputId='ram-'+s.id;
+      input.id=inputId;label.htmlFor=inputId;
+      const submit=document.createElement('button');
+      submit.type='submit';submit.className='secondary ramButton';submit.textContent='Save RAM';
+      submit.disabled=busy;
+      form.append(label,input,submit);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const requested=Number(input.value);
+        if(!Number.isInteger(requested)||requested<2||requested>s.max_ram_gb){
+          message('Choose a whole number between 2 and '+s.max_ram_gb+' GB.');return;
+        }
+        if(requested===s.ram_gb){message('RAM is already set to '+requested+' GB.');return}
+        saveRam(s,requested);
+      };
+      panel.append(form);
+      if(s.ram_change_pending){
+        const note=document.createElement('p');note.className='help muted';
+        note.textContent='The saved RAM setting will take effect on the next start.';
+        panel.append(note);
+      }
+      return panel;
+    }
+    async function deleteProfile(s){
+      if(busy||s.is_active)return;
+      const panel=document.getElementById('delete-'+s.id);
+      const name=panel?.querySelector('input')?.value;
+      if(name!==s.name){message('Type the exact server name before deleting.');return;}
+      if(!confirm('PERMANENTLY DELETE "'+s.name+'"? This destroys its saved worlds, mods, configuration, logs, and Docker game container. NO UNDO.')){
+        return;
+      }
+      setBusy(true);message('Deleting '+s.name+' permanently…');
+      try{
+        await request('/servers/'+s.id+'/delete',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({confirm_name:name,confirm_word:'DELETE'})
+        });
+        openDeleteId=null;
+        openPlayersId=null;
+        openRamId=null;
+        await refresh(true);
+        message('Server "'+s.name+'" permanently deleted.');
+      }catch(error){
+        message(error.message);
+        await refresh(true);
+      }finally{setBusy(false);paint()}
+    }
+    function deletePanel(s){
+      const panel=document.createElement('div');
+      panel.className='delete-panel';
+      panel.id='delete-'+s.id;
+      panel.hidden=openDeleteId!==s.id;
+      const warning=document.createElement('p');
+      warning.className='help';
+      warning.textContent='PERMANENT DELETE: World saves, mods, config, whitelist, metadata, and this game container will be removed. There is no undo or automatic backup. Back up any world you might want to keep.';
+      panel.append(warning);
+      const form=document.createElement('form');
+      const label=document.createElement('label');
+      label.textContent='Type "'+s.name+'" to confirm:';
+      const input=document.createElement('input');
+      input.type='text';input.required=true;input.autocomplete='off';
+      input.setAttribute('aria-label','Type server name to confirm deletion');
+      const submit=document.createElement('button');
+      submit.type='submit';submit.className='danger deleteButton';
+      submit.textContent='Permanently Delete Server';submit.disabled=true;
+      submit.dataset.confirmName=s.name;
+      input.addEventListener('input',()=>{submit.disabled=busy||input.value!==s.name});
+      form.append(label,input,submit);
+      form.onsubmit=event=>{event.preventDefault();deleteProfile(s)};
+      panel.append(form);
+      return panel;
+    }
+    const settingFields=[
+      {key:'pvp',label:'Player vs Player (PvP)',type:'bool',hint:'Allow players to damage each other.'},
+      {key:'difficulty',label:'Difficulty',type:'choice',options:['peaceful','easy','normal','hard'],hint:'Changes survival difficulty.'},
+      {key:'gamemode',label:'Default game mode',type:'choice',options:['survival','creative','adventure','spectator'],hint:'Default for new players; does not grant OP/cheats.'},
+      {key:'allow-flight',label:'Allow flight',type:'bool',hint:'Prevents kicks for flying mods or mounts.'},
+      {key:'enable-command-block',label:'Command blocks',type:'bool',hint:'Allows command blocks in the world.'},
+      {key:'spawn-monsters',label:'Spawn hostile mobs',type:'bool',hint:'Enable hostile mob spawning.'},
+      {key:'spawn-animals',label:'Spawn animals',type:'bool',hint:'Enable passive animal spawning.'},
+      {key:'spawn-npcs',label:'Spawn NPCs / villagers',type:'bool',hint:'Enable NPC spawning.'},
+      {key:'allow-nether',label:'Allow Nether',type:'bool',hint:'Enable access to the Nether dimension.'},
+      {key:'max-players',label:'Maximum players',type:'int',min:1,max:100,hint:'Maximum simultaneous players.'},
+      {key:'view-distance',label:'View distance (chunks)',type:'int',min:3,max:16,hint:'Lower values may improve performance, but affect modpacks.'},
+      {key:'spawn-protection',label:'Spawn protection radius',type:'int',min:0,max:128,hint:'0 disables spawn protection.'},
+    ];
+    async function saveSettings(s,changes){
+      if(busy||!Object.keys(changes).length)return;
+      setBusy(true);message('Saving '+s.name+' settings…');
+      try{
+        await request('/servers/'+s.id+'/settings',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({properties:changes})
+        });
+        await refresh(true);
+        message('Settings saved for '+s.name+'. '+(s.status==='running'?
+          'Restart Minecraft when convenient to apply the changes.':
+          'Changes will apply the next time this server starts.'));
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function settingsPanel(s){
+      const panel=document.createElement('div');
+      panel.className='settings-panel';panel.hidden=openSettingsId!==s.id;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Friendly server.properties settings. Changes are saved per server and applied at the next Minecraft start/restart. For commands and cheats, grant trusted players OP in Players; Java dedicated servers have no enable-cheats toggle.';
+      panel.append(help);
+      if(s.settings_pending){
+        const pending=document.createElement('p');
+        pending.className='help';pending.textContent='Settings pending — restart Minecraft when convenient to apply.';
+        panel.append(pending);
+      }
+      const form=document.createElement('form');
+      const grid=document.createElement('div');grid.className='setting-list';
+      const inputs={};
+      for(const cfg of settingFields){
+        const wrapper=document.createElement('div');wrapper.className='setting-field';
+        const locked=(s.locked_properties||[]).includes(cfg.key);
+        if(locked)wrapper.classList.add('disabled');
+        const label=document.createElement('label');
+        label.textContent=cfg.label+(locked?' (modpack locked)':'');
+        const id='setting-'+s.id+'-'+cfg.key;
+        label.htmlFor=id;
+        let input;
+        if(cfg.type==='choice'){
+          input=document.createElement('select');
+          for(const option of cfg.options){
+            const el=document.createElement('option');el.value=option;
+            el.textContent=option[0].toUpperCase()+option.slice(1);input.append(el);
+          }
+          input.value=s.server_properties?.[cfg.key]??cfg.options[0];
+        }else{
+          input=document.createElement('input');
+          if(cfg.type==='bool'){
+            input.type='checkbox';input.checked=!!s.server_properties?.[cfg.key];
+          }else{
+            input.type='number';input.min=cfg.min;input.max=cfg.max;input.step=1;
+            input.value=s.server_properties?.[cfg.key]??cfg.min;
+          }
+        }
+        input.id=id;input.disabled=locked||busy;inputs[cfg.key]=input;
+        if(cfg.type==='bool'){
+          const line=document.createElement('div');line.className='toggle-line';
+          line.append(input,label);wrapper.append(line);
+        }else wrapper.append(label,input);
+        const description=document.createElement('small');
+        description.textContent=locked?'Required for this modpack. '+cfg.hint:cfg.hint;
+        wrapper.append(description);grid.append(wrapper);
+      }
+      form.append(grid);
+      const save=actionButton('Save Settings','secondary',()=>{});
+      save.classList.add('settingsButton');save.type='submit';
+      form.append(save);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const changes={};
+        for(const cfg of settingFields){
+          if((s.locked_properties||[]).includes(cfg.key))continue;
+          const inp=inputs[cfg.key];
+          let value;
+          if(cfg.type==='bool')value=inp.checked;
+          else if(cfg.type==='int'){
+            value=Number(inp.value);
+            if(!Number.isInteger(value)||value<cfg.min||value>cfg.max){
+              message(cfg.label+' must be between '+cfg.min+' and '+cfg.max);return;
+            }
+          }else value=inp.value;
+          if(value!==s.server_properties?.[cfg.key])changes[cfg.key]=value;
+        }
+        if(!Object.keys(changes).length){message('No server settings changed.');return}
+        saveSettings(s,changes);
+      };
+      panel.append(form);
+      return panel;
+    }
+    async function sendConsole(s,command){
+      if(busy)return;
+      setBusy(true);message('Executing Minecraft command…');
+      try{
+        const result=await request('/servers/'+s.id+'/console',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({command})
+        });
+        consoleOutputs[s.id]=(consoleOutputs[s.id]||'')+'> '+result.command+'\n'+
+          (result.output||'(No text returned by Minecraft)')+'\n\n';
+        consoleOutputs[s.id]=consoleOutputs[s.id].slice(-8000);
+        message('Command sent. See the output in Console.');
+        await refresh(true);
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function consolePanel(s){
+      const panel=document.createElement('div');
+      panel.className='console-panel';panel.hidden=openConsoleId!==s.id;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Minecraft game commands only (for example: list, say Hello, time query daytime). These have full Minecraft administrator privileges and can change the world. They are NOT Linux shell commands.';
+      panel.append(help);
+      if(!s.is_active||s.status!=='running'||!s.player_controls_ready){
+        const msg=document.createElement('p');msg.className='help';
+        msg.textContent='Select and start this Minecraft server with RCON enabled to use its console. Older profiles may require Enable Players first.';
+        panel.append(msg);return panel;
+      }
+      const form=document.createElement('form');form.className='row';
+      const input=document.createElement('input');input.maxLength=256;input.required=true;
+      input.placeholder='list';input.setAttribute('aria-label','Minecraft console command');
+      const submit=actionButton('Execute','secondary',()=>{});submit.type='submit';
+      submit.classList.add('consoleButton');
+      form.append(input,submit);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const value=input.value.trim();
+        if(!value||/[\r\n\x00-\x1f\x7f]/.test(value)){
+          message('Enter a single Minecraft command, without newlines.');return;
+        }
+        sendConsole(s,value);
+      };
+      panel.append(form);
+      const out=document.createElement('pre');
+      out.textContent=consoleOutputs[s.id]||'Minecraft responses will appear here.';
+      panel.append(out);
+      return panel;
+    }
+    async function loadBackups(s){
+      if(busy)return;
+      try{
+        backupListings[s.id]=await request('/servers/'+s.id+'/backups');
+        delete backupErrors[s.id];
+      }catch(error){
+        backupErrors[s.id]=error.message;
+      }
+      paint();
+    }
+    async function createBackup(s){
+      if(busy||!['exited','created','not-created'].includes(s.status))return;
+      if(!confirm('Create a complete offline backup of '+s.name+' on the 20 TB backup drive? The game must remain stopped until it finishes.'))return;
+      setBusy(true);
+      message('Backing up '+s.name+'… Large modpacks may take several minutes. Do not start or delete this server until the backup completes.');
+      try{
+        const result=await request('/servers/'+s.id+'/backups',{method:'POST'});
+        message('Backup created: '+result.filename+' ('+Math.round(result.size_bytes/1048576)+' MiB).');
+        backupListings[s.id]=await request('/servers/'+s.id+'/backups');
+        delete backupErrors[s.id];
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function backupPanel(s){
+      const panel=document.createElement('div');panel.className='backup-panel';
+      panel.hidden=openBackupId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      intro.textContent='Safe offline backups only: the Minecraft game must be stopped. Each backup contains the complete server files and configuration, stored as an uncompressed TAR with SHA256 manifest on your separate backup drive. Scheduling, live backups, and in-portal restore are not yet enabled.';
+      panel.append(intro);
+      const allowed=['exited','created','not-created'].includes(s.status);
+      panel.append(actionButton('Create Offline Backup','secondary',()=>createBackup(s),!allowed));
+      if(!allowed){
+        const warning=document.createElement('p');warning.className='help';
+        warning.textContent='Stop the server first; creating a consistent backup of a running world is not enabled yet.';
+        panel.append(warning);
+      }
+      const error=backupErrors[s.id];
+      if(error){
+        const warning=document.createElement('p');warning.className='help';
+        warning.textContent=error;panel.append(warning);
+      }
+      const listing=backupListings[s.id];
+      if(listing){
+        const title=document.createElement('p');
+        title.textContent=listing.length?listing.length+' completed backup(s):':'No completed backups yet.';
+        panel.append(title);
+        for(const entry of listing){
+          const item=document.createElement('p');item.className='help muted';
+          item.textContent=entry.created_utc+' — '+entry.filename+' ('+
+            Math.round(entry.size_bytes/1048576)+' MiB, SHA256 '+entry.sha256.slice(0,12)+'…)';
+          panel.append(item);
+        }
+      }
+      return panel;
+    }
+    function actionButton(text,kind,callback,disabled=false){
+      const btn=document.createElement('button');
+      btn.className=(kind||'secondary')+' playerButton';
+      btn.textContent=text;btn.disabled=busy||disabled;btn.onclick=callback;
+      return btn;
+    }
+    function playerPanel(s){
+      const panel=document.createElement('div');panel.className='player-panel';panel.hidden=openPlayersId!==s.id;
+      const intro=document.createElement('p');intro.className='help muted';
+      if(!s.is_active || s.status!=='running'){
+        intro.textContent='Select this server and start Minecraft before editing its whitelist or operators.';
+        panel.append(intro);return panel;
+      }
+      if(!s.player_controls_ready){
+        intro.textContent='This server was installed before player management was available. Enabling it requires one Minecraft restart and will disconnect current players.';
+        panel.append(intro);
+        panel.append(actionButton('Enable Players (restart once)','secondary',()=>{
+          if(confirm('Restart '+s.name+' now to enable live whitelist and operator controls? Anyone connected will be disconnected.'))
+            doAction(s.id,'activate','enableplayers');
+        }));
+        return panel;
+      }
+      intro.textContent='Changes take effect immediately when Minecraft is ready. Operator (OP) grants powerful administrator commands; only grant it to someone you trust.';
+      panel.append(intro);
+      const form=document.createElement('form');form.className='row';
+      const input=document.createElement('input');
+      input.placeholder='Minecraft Java username';input.maxLength=16;
+      input.pattern='[A-Za-z0-9_]{3,16}';input.required=true;input.autocomplete='off';
+      input.setAttribute('aria-label','Minecraft Java username');
+      const add=actionButton('Add to whitelist','secondary',()=>{});
+      add.type='submit';
+      form.append(input,add);
+      form.onsubmit=event=>{
+        event.preventDefault();
+        const name=input.value.trim();
+        if(!/^[A-Za-z0-9_]{3,16}$/.test(name)){message('Use a valid Minecraft Java username (3–16 letters, numbers or underscores).');return}
+        doPlayerAction(s.id,'whitelist_add',name);
+      };
+      panel.append(form);
+      const list=document.createElement('div');
+      const allowed=s.whitelist||[],ops=s.ops||[];
+      if(!allowed.length){
+        const none=document.createElement('p');none.className='help muted';none.textContent='No whitelisted players yet.';list.append(none);
+      }
+      for(const player of allowed){
+        const row=document.createElement('div');row.className='player-line';
+        const name=document.createElement('strong');name.textContent=player;row.append(name);
+        const operator=ops.some(n=>n.toLowerCase()===player.toLowerCase());
+        const tag=document.createElement('span');tag.className='tag'+(operator?'':' off');tag.textContent=operator?'OP':'Player';row.append(tag);
+        row.append(actionButton(operator?'Revoke OP':'Grant OP','secondary',()=>{
+          if(operator){
+            if(confirm('Revoke operator privileges from '+player+'?'))doPlayerAction(s.id,'deop',player);
+          }else if(confirm('Grant FULL Minecraft operator privileges to '+player+'? This includes powerful server-admin commands.')){
+            doPlayerAction(s.id,'op',player);
+          }
+        }));
+        row.append(actionButton('Remove','danger',()=>{
+          if(confirm('Remove '+player+' from the whitelist? They will no longer be allowed to join.'))
+            doPlayerAction(s.id,'whitelist_remove',player);
+        },operator));
+        if(operator){
+          const note=document.createElement('small');note.textContent='Revoke OP before removing';row.append(note);
+        }
+        list.append(row);
+      }
+      const outsideOps=ops.filter(name=>!allowed.some(p=>p.toLowerCase()===name.toLowerCase()));
+      if(outsideOps.length){
+        const notice=document.createElement('p');notice.className='help muted';
+        notice.textContent='Existing operators outside the whitelist (set outside this portal): '+outsideOps.join(', ');
+        list.append(notice);
+        for(const player of outsideOps){
+          list.append(actionButton('Revoke OP: '+player,'danger',()=>{
+            if(confirm('Revoke operator privileges from '+player+'?'))doPlayerAction(s.id,'deop',player);
+          }));
+        }
+      }
+      panel.append(list);return panel;
+    }
+    function paint(){
+      const selectedBefore=$('serverSelect').value;
+      const current=active();
+      const selector=$('serverSelect');selector.replaceChildren();
+      for(const s of servers){
+        const opt=document.createElement('option');
+        opt.value=s.id;opt.textContent=s.name+' ('+s.status+')';
+        selector.append(opt);
+      }
+      const preferred=servers.some(s=>s.id===selectedBefore)?selectedBefore:(current?.id||servers[0]?.id);
+      if(preferred)selector.value=preferred;
+      $('activeSummary').textContent=current
+        ? current.name+' — '+(current.status==='running'?'running':current.status==='not-created'?'not started':current.status)
+        : 'No active server selected.';
+      $('joinAddress').textContent=servers.length?'Friends join: '+servers[0].address:'Install a server to begin.';
+      $('activate').disabled=busy||!servers.length||selector.value===current?.id;
+      $('activeControls').hidden=!current;
+      $('start').disabled=busy||!current||current.status==='running';
+      $('stop').disabled=busy||!current||current.status!=='running';
+      $('restart').disabled=busy||!current||current.status!=='running';
+      const area=$('servers');area.replaceChildren();
+      if(!servers.length){area.textContent='No server profiles installed yet.';return}
+      for(const s of servers){
+        const box=document.createElement('div');box.className='server';
+        const title=document.createElement('div');title.className='server-name';
+        const heading=document.createElement('strong');heading.textContent=s.name;
+        const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
+        title.append(heading,badge);
+        const details=document.createElement('p');details.className='muted help';
+        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
+        logs.disabled=busy;
+        logs.onclick=async()=>{
+          try{message('');$('logs').textContent=(await request('/servers/'+s.id+'/logs')).logs}
+          catch(error){message(error.message)}
+        };
+        const playersBtn=actionButton('Players','secondary',()=>{
+          openPlayersId=openPlayersId===s.id?null:s.id;paint();
+        });
+        playersBtn.setAttribute('aria-expanded',String(openPlayersId===s.id));
+        const ramBtn=actionButton('Edit RAM','secondary',()=>{
+          openRamId=openRamId===s.id?null:s.id;paint();
+        });
+        ramBtn.classList.add('ramButton');
+        ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
+        box.append(title,details,logs,playersBtn,ramBtn);
+        const settingsBtn=actionButton('Settings','secondary',()=>{
+          openSettingsId=openSettingsId===s.id?null:s.id;paint();
+        });
+        settingsBtn.classList.add('settingsButton');
+        settingsBtn.setAttribute('aria-expanded',String(openSettingsId===s.id));
+        box.append(settingsBtn);
+        const consoleBtn=actionButton('Console','secondary',()=>{
+          openConsoleId=openConsoleId===s.id?null:s.id;paint();
+        });
+        consoleBtn.classList.add('consoleButton');
+        consoleBtn.setAttribute('aria-expanded',String(openConsoleId===s.id));
+        box.append(consoleBtn);
+        const backupBtn=actionButton('Backups','secondary',()=>{
+          openBackupId=openBackupId===s.id?null:s.id;
+          if(openBackupId===s.id)loadBackups(s);else paint();
+        });
+        backupBtn.classList.add('backupButton');
+        backupBtn.setAttribute('aria-expanded',String(openBackupId===s.id));
+        box.append(backupBtn);
+        const deletable=!s.is_active&&['exited','created','not-created'].includes(s.status);
+        if(deletable){
+          const deleteBtn=actionButton('Delete Server','danger',()=>{
+            openDeleteId=openDeleteId===s.id?null:s.id;paint();
+          });
+          deleteBtn.classList.add('deleteButton');
+          deleteBtn.setAttribute('aria-expanded',String(openDeleteId===s.id));
+          box.append(deleteBtn);
+        }
+        box.append(playerPanel(s),ramPanel(s),settingsPanel(s),consolePanel(s),backupPanel(s));
+        if(deletable)box.append(deletePanel(s));
+        area.append(box);
+      }
+    }
+    async function refresh(quiet=false){
+      try{servers=await request('/servers');if(!quiet)message('');paint()}
+      catch(error){message(error.message)}
+    }
+    $('connect').onclick=()=>{token=$('token').value;refresh()};
+    $('refresh').onclick=()=>refresh();
+    $('serverSelect').onchange=()=>paint();
+    $('activate').onclick=()=>{
+      const target=servers.find(s=>s.id===$('serverSelect').value),old=active();
+      if(!target||target.id===old?.id)return;
+      if(old?.status==='running'&&!confirm('Stop "'+old.name+'" and start "'+target.name+'" on the same game port?'))return;
+      doAction(target.id,'activate');
+    };
+    $('start').onclick=()=>{const s=active();if(s)doAction(s.id,'start')};
+    $('stop').onclick=()=>{const s=active();if(s&&confirm('Stop "'+s.name+'"?'))doAction(s.id,'stop')};
+    $('restart').onclick=()=>{const s=active();if(s&&confirm('Restart "'+s.name+'"?'))doAction(s.id,'restart')};
+    function updateFtbOptions(){
+      const enabled=!!$('ftbUrl').value.trim();
+      $('ftbOptions').hidden=!enabled;
+      $('ftbVersion').required=enabled;
+    }
+    $('ftbUrl').addEventListener('input',updateFtbOptions);
+    updateFtbOptions();
+    $('create').onsubmit=async event=>{
+      event.preventDefault();
+      if(busy)return;
+      const form=new FormData(event.target);
+      for(const key of ['pack','world'])if(!form.get(key)?.size)form.delete(key);
+      const count=[!!form.get('cf_url')?.trim(),!!form.get('ftb_url')?.trim(),!!form.get('pack')].filter(Boolean).length;
+      if(count!==1){message('Provide one source: CurseForge URL, FTB URL, or server ZIP.');return}
+      if(form.get('ftb_url')&&!/^[1-9][0-9]*$/.test(form.get('ftb_version_id')||'')){
+        message('Enter the FTB version ID shown on the pack Versions tab.');return;
+      }
+      setBusy(true);message('Uploading and installing server profile…');
+      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();await refresh(true);message('Server profile installed. Select it above and click Make Active when ready; FTB downloads on first startup.')}
+      catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    };
+  </script>
+</body>
+</html>
