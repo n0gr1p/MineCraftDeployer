@@ -211,21 +211,21 @@ The local export is intentionally pinned; restarting the same profile does not r
 
 Every installed **custom CurseForge ZIP** profile has a **Mods & compatibility** panel. It is designed for cases where the client-export manifest loads client-side code on a dedicated server, or a specific pinned mod release has a dedicated-server bug.
 
-- **Refresh diagnostics:** shows high-confidence errors found in recent startup logs (for example, \`creativecore\` mixing into a client-only renderer). It does not automatically guess that upgrading a particular mod will be safe.
-- **Replace pinned mod file:** enter the CurseForge project ID, a **verified** compatible replacement file ID, human-readable mod name, old and new version labels, and why the change is needed. The portal generates \`minecraft/.mcd/curseforge-effective.zip\` with only those file-ID changes. The original \`minecraft/.mcd/curseforge-pack.zip\` and the world stay unchanged.
-- **Exclude from dedicated server:** enter the original manifest project ID. The installer gets \`CF_EXCLUDE_MODS\`, leaving the original client ZIP unchanged. Only exclude mods that are unnecessary on the server.
+- **Refresh diagnostics:** shows high-confidence errors found in recent startup logs (for example, `creativecore` mixing into a client-only renderer). It does not automatically guess that upgrading a particular mod will be safe.
+- **Replace pinned mod file:** enter the CurseForge project ID, a **verified** compatible replacement file ID, human-readable mod name, old and new version labels, and why the change is needed. The portal generates `minecraft/.mcd/curseforge-effective.zip` with only those file-ID changes. The original `minecraft/.mcd/curseforge-pack.zip` and the world stay unchanged.
+- **Exclude from dedicated server:** enter the original manifest project ID. The installer gets `CF_EXCLUDE_MODS`, leaving the original client ZIP unchanged. Only exclude mods that are unnecessary on the server.
 - **Player update notice only:** if the server was already fixed outside the portal, record the client's outdated version and the required client release without changing the server again.
 - **Remove rule:** revert the server-side override or notice; the original pinned file is restored on the next game restart, with a forced CurseForge reconciliation.
 
 For any replacement where clients should update, enable **Notify players to update their client**. The portal shows a durable, per-profile warning such as **"Client updates needed: CreativeCore → 2.14.18"**, plus detailed instructions under **Mods & compatibility**:
 
-\`\`\`
+```
 CreativeCore — replace (project 257814)
 Original file ID: 8894326
 Server file ID: 9009764
 Players must update CreativeCore from 2.14.16 to 2.14.18.
 Reason: Dedicated-server mixin crash.
-\`\`\`
+```
 
 The notice is an **administrator-authored compatibility requirement**, not a claim that the portal has independently verified every installed player's mod versions. Not all server-only fixes need a client update: disable that option when the mod's author explicitly documents version interoperability. Version labels are display strings; **CurseForge file IDs** control the actual server installation. The portal does not fetch untrusted version URLs, execute supplied mod scripts, or silently choose a latest version.
 
