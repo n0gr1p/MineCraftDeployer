@@ -1,5 +1,6 @@
 """No Docker daemon required; verify the one-active-container invariant."""
 import json
+import hashlib
 import os
 import tempfile
 import io
