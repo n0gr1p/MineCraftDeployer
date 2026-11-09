@@ -107,3 +107,100 @@ def prepare_pack(data: Path, safe_extract) -> dict:
         raise ValueError("CurseForge client-export ZIP is not a server pack; provide a dedicated server pack ZIP")
 
     raise ValueError("No supported server launcher found (expected server.jar or ServerPackCreator variables.txt)")
+
+
+def inspect_curseforge_export(source: Path) -> dict | None:
+    """Recognize an unpublished CurseForge *client export* without extracting it.
+
+    The itzg AUTO_CURSEFORGE installer downloads the exact project/file IDs,
+    applies overrides, and filters recognized client-only mods. We do not execute
+    any scripts or resolve/download the mods in the portal process.
+    """
+    import json
+
+    with zipfile.ZipFile(source) as archive:
+        try:
+            info = archive.getinfo("manifest.json")
+        except KeyError:
+            return None
+        if info.file_size > 1024 * 1024:
+            raise ValueError("CurseForge manifest exceeds 1 MiB")
+        try:
+            manifest = json.loads(archive.read(info))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("Invalid CurseForge client-export manifest JSON") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("CurseForge manifest must be an object")
+        # Other dedicated server packs can contain an unrelated manifest.json;
+        # their existing import logic should remain unchanged.
+        if "manifestType" not in manifest:
+            return None
+        if manifest.get("manifestType") != "minecraftModpack" or type(manifest.get("manifestVersion")) is not int or manifest["manifestVersion"] != 1:
+            raise ValueError("Unsupported CurseForge client-export manifest format")
+        minecraft = manifest.get("minecraft")
+        if not isinstance(minecraft, dict):
+            raise ValueError("CurseForge manifest is missing minecraft settings")
+        version = minecraft.get("version")
+        if not isinstance(version, str) or not _VERSION.fullmatch(version):
+            raise ValueError("Invalid CurseForge Minecraft version")
+        loaders = minecraft.get("modLoaders")
+        if not isinstance(loaders, list):
+            raise ValueError("CurseForge manifest is missing modLoaders")
+        primary = [loader.get("id") for loader in loaders
+                   if isinstance(loader, dict) and loader.get("primary") is True]
+        if len(primary) != 1 or not isinstance(primary[0], str):
+            raise ValueError("CurseForge manifest requires exactly one primary mod loader")
+        match = re.fullmatch(r"(fabric|forge|neoforge|quilt)-([A-Za-z0-9][A-Za-z0-9.+-]{0,79})", primary[0], re.I)
+        if not match:
+            raise ValueError("Unsupported CurseForge mod loader: " + primary[0][:100])
+        files = manifest.get("files")
+        if not isinstance(files, list) or not 1 <= len(files) <= 10000:
+            raise ValueError("CurseForge manifest must list 1-10000 exact mod file references")
+        projects = set()
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise ValueError("Malformed CurseForge mod reference")
+            project_id, file_id = entry.get("projectID"), entry.get("fileID")
+            if (type(project_id) is not int or project_id <= 0 or
+                    type(file_id) is not int or file_id <= 0 or
+                    type(entry.get("required")) is not bool or project_id in projects):
+                raise ValueError("CurseForge mod references require unique positive project/file IDs and required flags")
+            projects.add(project_id)
+        overrides = manifest.get("overrides", "overrides")
+        if (not isinstance(overrides, str) or not overrides or
+                Path(overrides).is_absolute() or ".." in Path(overrides).parts or
+                "\\" in overrides or ":" in overrides):
+            raise ValueError("Unsafe CurseForge overrides path")
+        members = archive.infolist()
+        if len(members) > 50000:
+            raise ValueError("Too many archive members")
+        expanded = 0
+        for member in members:
+            name = member.filename
+            path = Path(name)
+            if (path.is_absolute() or ".." in path.parts or
+                    "\\" in name or ":" in name or
+                    ((member.external_attr >> 16) & 0o170000) == 0o120000):
+                raise ValueError("Unsafe CurseForge archive member")
+            expanded += member.file_size
+            if expanded > 12 * 1024**3:
+                raise ValueError("CurseForge archive expands beyond 12 GiB")
+
+    parts = [int(part) for part in version.split(".")]
+    if parts[0] >= 26:
+        java = 25
+    elif parts[0] == 1:
+        minor = parts[1]
+        patch = parts[2] if len(parts) > 2 else 0
+        java = 8 if minor <= 16 else (21 if minor >= 21 or (minor == 20 and patch >= 5) else 17)
+    else:
+        raise ValueError("Unsupported CurseForge Minecraft version for automatic Java selection")
+    return {
+        "mode": "curseforge_zip",
+        "pack_format": "curseforge-client-export",
+        "minecraft_version": version,
+        "loader_version": match.group(2),
+        "loader_type": match.group(1).lower(),
+        "java_version": java,
+        "mod_count": len(files),
+    }
