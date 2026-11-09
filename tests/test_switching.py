@@ -1,5 +1,6 @@
 """No Docker daemon required; verify the one-active-container invariant."""
 import json
+import hashlib
 import os
 import tempfile
 import io
@@ -1134,3 +1135,184 @@ def test_ftb_source_with_world_import_keeps_world_data(environment):
     assert result.status_code==200,result.text
     sid=result.json()["id"]
     assert (portal.ROOT/sid/"minecraft"/"world"/"level.dat").read_bytes()==b"imported FTB world"
+
+
+def custom_curseforge_export(version="26.3", loader="fabric-0.19.5", mods=None):
+    """A minimal authentic-format private CurseForge client export."""
+    manifest={
+        "minecraft":{"version":version,"modLoaders":[{"id":loader,"primary":True}]},
+        "manifestType":"minecraftModpack","manifestVersion":1,
+        "name":"Family's Custom Pack","version":"0.1.0","author":"Family",
+        "overrides":"overrides",
+        "files":mods if mods is not None else [
+            {"projectID":606989,"fileID":9018522,"required":True,"isLocked":False},
+            {"projectID":699872,"fileID":8920440,"required":True,"isLocked":False},
+            {"projectID":809311,"fileID":8919465,"required":False,"isLocked":False},
+        ]
+    }
+    result=io.BytesIO()
+    with zipfile.ZipFile(result,"w") as archive:
+        archive.writestr("manifest.json",json.dumps(manifest))
+        archive.writestr("modlist.html","<html>Custom modlist</html>")
+        archive.writestr("overrides/config/custom-settings.json",'{"custom":true}')
+        archive.writestr("overrides/shaderpacks/family-shader.txt",b"family shader")
+    return result.getvalue()
+
+
+def test_custom_curseforge_export_keeps_exact_zip_and_runs_native_installer(environment):
+    original=custom_curseforge_export()
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Custom Realism","ram_gb":"8","players":"TestPlayer"},
+            files={"pack":("Better Realism custom.zip",original,"application/zip")})
+    assert response.status_code==200,response.text
+    sid=response.json()["id"]
+    meta=portal.meta_for(sid)
+    assert meta["mode"]=="curseforge_zip"
+    assert meta["pack_format"]=="curseforge-client-export"
+    assert meta["minecraft_version"]=="26.3"
+    assert meta["loader_version"]=="0.19.5"
+    assert meta["loader_type"]=="fabric"
+    assert meta["java_version"]==25
+    assert meta["mod_count"]==3
+    assert meta["pack_sha256"]==hashlib.sha256(original).hexdigest()
+    data=portal.ROOT/sid/"minecraft"
+    assert (data/".mcd"/"curseforge-pack.zip").read_bytes()==original
+    assert not (data/"overrides").exists()  # Docker's installer applies overrides.
+    assert not environment.containers.creations  # Installation stays offline.
+    portal.activate(sid)
+    created=environment.containers.creations[-1]
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java25"
+    assert created["environment"]["TYPE"]=="AUTO_CURSEFORGE"
+    assert created["environment"]["CF_SLUG"]=="custom"
+    assert created["environment"]["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-pack.zip"
+    assert "CF_PAGE_URL" not in created["environment"]
+    assert created["environment"]["MEMORY"]=="8G"
+    assert created["mem_limit"]=="9g"
+    assert "nano_cpus" not in created
+    portal.restart_active(sid)
+    assert len(environment.containers.creations)==1
+    assert (data/".mcd"/"curseforge-pack.zip").read_bytes()==original
+
+
+def test_custom_curseforge_world_import_preserves_existing_save(environment):
+    world=io.BytesIO()
+    with zipfile.ZipFile(world,"w") as archive:
+        archive.writestr("Autism Inc/level.dat",b"existing level data")
+        archive.writestr("Autism Inc/region/r.0.0.mca",b"region data")
+        archive.writestr("Autism Inc/playerdata/player.dat",b"player data")
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Existing World","players":"TestPlayer","ram_gb":"8"},
+            files={
+                "pack":("custom.zip",custom_curseforge_export(),"application/zip"),
+                "world":("Autism Inc.zip",world.getvalue(),"application/zip")
+            })
+    assert response.status_code==200,response.text
+    sid=response.json()["id"]
+    data=portal.ROOT/sid/"minecraft"
+    assert (data/"world"/"level.dat").read_bytes()==b"existing level data"
+    assert (data/"world"/"region"/"r.0.0.mca").read_bytes()==b"region data"
+    assert (data/"world"/"playerdata"/"player.dat").read_bytes()==b"player data"
+    assert len(environment.containers.creations)==0
+
+
+@pytest.mark.parametrize("version,loader,java",[
+    ("1.16.5","forge-36.2.0",8),
+    ("1.20.1","fabric-0.15.1",17),
+    ("1.20.5","neoforge-20.5.1",21),
+    ("1.21.11","fabric-0.18.0",21),
+    ("26.3","fabric-0.19.5",25),
+])
+def test_curseforge_custom_export_selects_matching_runtime(environment,version,loader,java):
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Runtime test","players":"TestPlayer"},
+            files={"pack":("custom.zip",custom_curseforge_export(version,loader),"application/zip")})
+    assert response.status_code==200,response.text
+    sid=response.json()["id"]
+    assert portal.meta_for(sid)["java_version"]==java
+    portal.activate(sid)
+    assert environment.containers.images[-1]==f"itzg/minecraft-server:java{java}"
+
+
+def test_missing_custom_curseforge_zip_cannot_stop_existing_server(environment):
+    current=install_profile(portal.ROOT,121)
+    portal.activate(current)
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Future server","players":"TestPlayer"},
+            files={"pack":("custom.zip",custom_curseforge_export(),"application/zip")})
+    assert response.status_code==200,response.text
+    sid=response.json()["id"]
+    (portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-pack.zip").unlink()
+    with pytest.raises(HTTPException) as error:
+        portal.activate(sid)
+    assert error.value.status_code==409
+    assert portal.active_id()==current
+    assert environment.containers.items[current].status=="running"
+    assert len(environment.containers.creations)==1
+
+
+def test_tampered_custom_curseforge_zip_cannot_stop_existing_server(environment):
+    current=install_profile(portal.ROOT,122)
+    portal.activate(current)
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Future server","players":"TestPlayer"},
+            files={"pack":("custom.zip",custom_curseforge_export(),"application/zip")})
+    assert response.status_code==200,response.text
+    sid=response.json()["id"]
+    archive=portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-pack.zip"
+    with archive.open("ab") as output:
+        output.write(b"tampered")
+    with pytest.raises(HTTPException) as error:
+        portal.activate(sid)
+    assert error.value.status_code==409
+    assert "changed after installation" in str(error.value.detail)
+    assert environment.containers.items[current].status=="running"
+
+
+@pytest.mark.parametrize("manifest_patch",[
+    {"manifestVersion":2},
+    {"minecraft":{"version":"26.3","modLoaders":[{"id":"fabric-0.19.5","primary":False}]}},
+    {"files":[{"projectID":1,"fileID":2,"required":False},{"projectID":1,"fileID":3,"required":True}]},
+    {"files":[{"projectID":1,"fileID":2,"required":"true"}]},
+    {"overrides":"../unsafe"},
+])
+def test_malformed_custom_curseforge_exports_are_rejected(environment,manifest_patch):
+    with zipfile.ZipFile(io.BytesIO(custom_curseforge_export())) as original:
+        manifest=json.loads(original.read("manifest.json"))
+    manifest.update(manifest_patch)
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,"w") as archive:
+        archive.writestr("manifest.json",json.dumps(manifest))
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Invalid export","players":"TestPlayer"},
+            files={"pack":("broken.zip",out.getvalue(),"application/zip")})
+    assert response.status_code==400,response.text
+    assert not list(portal.ROOT.glob("*/meta.json"))
+
+
+def test_custom_curseforge_zip_with_traversal_is_rejected(environment):
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,"w") as archive:
+        with zipfile.ZipFile(io.BytesIO(custom_curseforge_export())) as original:
+            archive.writestr("manifest.json",original.read("manifest.json"))
+        archive.writestr("overrides/../../minecraft/server.properties","op=true")
+    with TestClient(portal.app) as http:
+        response=http.post("/api/servers",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Unsafe export","players":"TestPlayer"},
+            files={"pack":("unsafe.zip",out.getvalue(),"application/zip")})
+    assert response.status_code==400,response.text
+    assert "Unsafe" in response.json()["detail"]
+    assert not list(portal.ROOT.glob("*/meta.json"))
+
