@@ -632,6 +632,12 @@ def set_mod_compatibility(sid:str,change:ModChanges,
         except (ValueError,OSError,zipfile.BadZipFile) as exc:
             raise HTTPException(400,str(exc)) from exc
         meta["mod_changes"]=clean
+        if any(item["action"]=="replace" for item in clean):
+            derived=mod_compat.zip_location(path_for(sid))/mod_compat.EFFECTIVE
+            with derived.open("rb") as handle:
+                meta["effective_sha256"]=hashlib.file_digest(handle,"sha256").hexdigest()
+        else:
+            meta.pop("effective_sha256",None)
         write_meta(meta)
         # Saving never restarts Minecraft. Startup and restart apply changes.
         return state(meta)
