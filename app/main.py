@@ -5,11 +5,12 @@ from urllib.parse import urlparse
 import docker
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 from app.pack_import import inspect_curseforge_export, prepare_pack
-from app import mod_compat
+from app import mod_compat, profile_transfer
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -271,6 +272,18 @@ def check_launch(meta):
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
+def pack_source_pending(c,meta):
+    if not c: return False
+    current=minecraft_env(c)
+    if meta["mode"]=="ftb":
+        return (current.get("TYPE")!="FTBA" or
+            current.get("FTB_MODPACK_VERSION_ID")!=str(meta["ftb_version_id"]))
+    if meta["mode"]=="curseforge":
+        return (current.get("TYPE")!="AUTO_CURSEFORGE" or
+            current.get("CF_PAGE_URL")!=meta["cf_url"])
+    return False
+
+
 def get_or_create_container(meta):
     sid=meta["id"]
     c=container_for(sid)
@@ -290,7 +303,11 @@ def get_or_create_container(meta):
         mod_mismatch=bool(meta["mode"]=="curseforge_zip" and
             (minecraft_env(c).get("MCD_MOD_REVISION") not in
                 (mod_compat.runtime_signature(meta), None if not mod_compat.runtime_changes(meta) else "")))
-        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch or settings_pending(c,meta) or mod_mismatch:
+        source_mismatch=pack_source_pending(c,meta)
+        java_mismatch=c.attrs.get("Config",{}).get("Image")!=f"itzg/minecraft-server:java{meta.get('java_version',21)}"
+        if (ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c)
+                or ram_mismatch or settings_pending(c,meta) or mod_mismatch
+                or source_mismatch or java_mismatch):
             # Recreate on changed port, incompatible options, or changed RAM/heap.
             # /data is a bind mount. Removing the game container does not delete game files.
             c.update(restart_policy={"Name":"no"})
@@ -497,6 +514,11 @@ def state(meta):
             "loader_type":meta.get("loader_type"),
             "mod_count":meta.get("mod_count"),
             "mod_change_count":len(meta.get("mod_changes",[])),
+            "pack_update_notice":meta.get("pack_update_notice"),
+            "pack_update_pending":bool(c and (
+                pack_source_pending(c,meta) or (
+                meta.get("mode")=="curseforge_zip" and
+                minecraft_env(c).get("MCD_MOD_REVISION")!=mod_compat.runtime_signature(meta)))) ,
             "client_updates":mod_compat.client_notices(meta) if meta.get("mode")=="curseforge_zip" else [],
             "mod_changes_pending":bool(meta.get("mode")=="curseforge_zip" and c and
                 (minecraft_env(c).get("MCD_MOD_REVISION") not in
