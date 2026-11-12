@@ -5,11 +5,12 @@ from urllib.parse import urlparse
 import docker
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 from app.pack_import import inspect_curseforge_export, prepare_pack
-from app import mod_compat
+from app import mod_compat, profile_transfer
 
 ROOT=Path(os.getenv("MCD_DATA","/data")).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -271,6 +272,18 @@ def check_launch(meta):
     if meta["mode"]=="zip" and not (path_for(meta["id"])/"minecraft"/"server.jar").is_file():
         raise HTTPException(409,"Server ZIP must include a top-level server.jar")
 
+def pack_source_pending(c,meta):
+    if not c: return False
+    current=minecraft_env(c)
+    if meta["mode"]=="ftb":
+        return (current.get("TYPE")!="FTBA" or
+            current.get("FTB_MODPACK_VERSION_ID")!=str(meta["ftb_version_id"]))
+    if meta["mode"]=="curseforge":
+        return (current.get("TYPE")!="AUTO_CURSEFORGE" or
+            current.get("CF_PAGE_URL")!=meta["cf_url"])
+    return False
+
+
 def get_or_create_container(meta):
     sid=meta["id"]
     c=container_for(sid)
@@ -290,7 +303,12 @@ def get_or_create_container(meta):
         mod_mismatch=bool(meta["mode"]=="curseforge_zip" and
             (minecraft_env(c).get("MCD_MOD_REVISION") not in
                 (mod_compat.runtime_signature(meta), None if not mod_compat.runtime_changes(meta) else "")))
-        if ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c) or ram_mismatch or settings_pending(c,meta) or mod_mismatch:
+        source_mismatch=pack_source_pending(c,meta)
+        container_image=c.attrs.get("Config",{}).get("Image")
+        java_mismatch=bool(container_image and container_image!=f"itzg/minecraft-server:java{meta.get('java_version',21)}")
+        if (ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c)
+                or ram_mismatch or settings_pending(c,meta) or mod_mismatch
+                or source_mismatch or java_mismatch):
             # Recreate on changed port, incompatible options, or changed RAM/heap.
             # /data is a bind mount. Removing the game container does not delete game files.
             c.update(restart_policy={"Name":"no"})
@@ -497,6 +515,11 @@ def state(meta):
             "loader_type":meta.get("loader_type"),
             "mod_count":meta.get("mod_count"),
             "mod_change_count":len(meta.get("mod_changes",[])),
+            "pack_update_notice":meta.get("pack_update_notice"),
+            "pack_update_pending":bool(c and meta.get("pack_update_notice") and (
+                pack_source_pending(c,meta) or (
+                meta.get("mode")=="curseforge_zip" and
+                minecraft_env(c).get("MCD_MOD_REVISION")!=mod_compat.runtime_signature(meta)))),
             "client_updates":mod_compat.client_notices(meta) if meta.get("mode")=="curseforge_zip" else [],
             "mod_changes_pending":bool(meta.get("mode")=="curseforge_zip" and c and
                 (minecraft_env(c).get("MCD_MOD_REVISION") not in
@@ -585,6 +608,165 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
     except (ValueError,OSError,zipfile.BadZipFile) as exc:
         shutil.rmtree(root,ignore_errors=True)
         raise HTTPException(400,str(exc)) from exc
+
+
+@app.get("/api/servers/{sid}/world/download")
+def download_world(sid:str,authorization:str|None=Header(None)):
+    """Download a complete world save with the existing portal bearer token.
+
+    Exporting stopped worlds avoids inconsistent data while chunks are written.
+    The ZIP is temporary and removed when the response has been sent.
+    """
+    auth(authorization)
+    with deployment_lock():
+        meta=meta_for(sid)
+        game=container_for(sid)
+        if game:
+            game.reload()
+            if running(game):
+                raise HTTPException(409,
+                    "Stop this Minecraft server in the portal before downloading its world. "
+                    "A running world cannot be captured consistently.")
+        try:
+            archive=profile_transfer.export_stopped_world(ROOT,path_for(sid),meta)
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(409,f"World download unavailable: {exc}") from exc
+    label=re.sub(r"[^A-Za-z0-9_-]+","-",meta["name"]).strip("-") or "minecraft"
+    return FileResponse(archive,media_type="application/zip",
+        filename=f"{label}-world.zip",
+        background=BackgroundTask(lambda: archive.unlink(missing_ok=True)))
+
+
+@app.post("/api/servers/{sid}/pack-update")
+async def update_pack(sid:str,pack:UploadFile|None=File(None),
+                      ftb_version_id:str=Form(""),cf_url:str=Form(""),
+                      authorization:str|None=Header(None)):
+    """Stage a new modpack release while preserving the installed world.
+
+    ZIP upgrades are constrained to the existing Minecraft game version and
+    mod-loader family; cross-Minecraft migrations require another profile.
+    """
+    auth(authorization)
+    current=meta_for(sid)
+    mode=current.get("mode")
+    if mode not in ("curseforge_zip","ftb","curseforge"):
+        raise HTTPException(409,"This server type does not support in-place modpack updates")
+    if mode=="curseforge_zip":
+        if pack is None or ftb_version_id or cf_url:
+            raise HTTPException(400,"Upload one custom CurseForge export ZIP")
+        root=path_for(sid)
+        staged=root/(".pending-pack-"+uuid.uuid4().hex+".zip")
+        try:
+            await save_upload(pack,staged)
+            detected=inspect_curseforge_export(staged)
+            if not detected or detected.get("mode")!="curseforge_zip":
+                raise ValueError("The update must be a customized CurseForge export ZIP")
+            with deployment_lock():
+                meta=meta_for(sid)
+                if meta.get("mode")!="curseforge_zip":
+                    raise ValueError("The profile changed during the upload")
+                if (detected["minecraft_version"]!=meta["minecraft_version"] or
+                        detected["loader_type"]!=meta["loader_type"] or
+                        detected["java_version"]!=meta["java_version"]):
+                    raise ValueError("The update changes Minecraft version or loader family. "
+                        "Create a separate server profile for a world/version migration.")
+                source=mod_compat.verified_source(root,meta)
+                old_manifest=mod_compat.source_manifest(source)
+                new_manifest=mod_compat.source_manifest(staged)
+                mod_compat.validate_changes(new_manifest,meta.get("mod_changes",[]))
+                with staged.open("rb") as stream:
+                    new_sha=hashlib.file_digest(stream,"sha256").hexdigest()
+                if new_sha==meta["pack_sha256"]:
+                    raise ValueError("This is the same custom modpack already installed")
+                history=source.parent/"pack-history"
+                history.mkdir(exist_ok=True)
+                previous=history/(meta["pack_sha256"]+".zip")
+                if previous.exists():
+                    with previous.open("rb") as handle:
+                        if hashlib.file_digest(handle,"sha256").hexdigest()!=meta["pack_sha256"]:
+                            raise ValueError("Previous-pack backup checksum is invalid")
+                else:
+                    shutil.copy2(source,previous)
+                old=meta.copy()
+                try:
+                    staged.replace(source)
+                    meta.update(detected)
+                    meta["pack_sha256"]=new_sha
+                    old_version=old_manifest.get("version")
+                    new_version=new_manifest.get("version")
+                    meta["pack_update_notice"]={
+                        "type":"curseforge_zip",
+                        "previous":old_version if isinstance(old_version,str) else old["pack_sha256"][:12],
+                        "current":new_version if isinstance(new_version,str) else new_sha[:12],
+                        "message":"Install the updated custom CurseForge profile on each client before joining.",
+                    }
+                    edits=meta.get("mod_changes",[])
+                    mod_compat.generate_effective(root,meta,edits)
+                    if any(item["action"]=="replace" for item in edits):
+                        effective=mod_compat.zip_location(root)/mod_compat.EFFECTIVE
+                        with effective.open("rb") as stream:
+                            meta["effective_sha256"]=hashlib.file_digest(stream,"sha256").hexdigest()
+                    else:
+                        meta.pop("effective_sha256",None)
+                    write_meta(meta)
+                except Exception:
+                    shutil.copy2(previous,source)
+                    if old.get("mod_changes"):
+                        mod_compat.generate_effective(root,old,old["mod_changes"])
+                    raise
+                return state(meta)
+        except (ValueError,OSError,zipfile.BadZipFile) as exc:
+            raise HTTPException(400,str(exc)) from exc
+        finally:
+            staged.unlink(missing_ok=True)
+
+    if pack is not None:
+        raise HTTPException(400,"Use the URL or pinned version field for this server type")
+    with deployment_lock():
+        meta=meta_for(sid)
+        if meta.get("mode")!=mode:
+            raise HTTPException(409,"Server type changed; refresh and retry")
+        if mode=="ftb":
+            if cf_url or not re.fullmatch(r"[1-9][0-9]{0,9}",ftb_version_id):
+                raise HTTPException(400,"Provide a positive numeric FTB version ID")
+            new_version=int(ftb_version_id)
+            if new_version==meta["ftb_version_id"]:
+                raise HTTPException(400,"That FTB version is already selected")
+            previous=str(meta["ftb_version_id"])
+            meta["ftb_version_id"]=new_version
+            meta["pack_update_notice"]={
+                "type":"ftb","previous":previous,"current":str(new_version),
+                "message":"Update the FTB client pack to the new pinned version before joining.",
+            }
+        else:
+            if ftb_version_id or not cf_url:
+                raise HTTPException(400,"Provide the new CurseForge modpack file URL")
+            parsed=urlparse(cf_url)
+            previous_url=urlparse(meta["cf_url"])
+            if (parsed.scheme!="https" or parsed.hostname not in
+                ("curseforge.com","www.curseforge.com") or parsed.username or parsed.password or
+                parsed.query or parsed.fragment or
+                not re.fullmatch(r"/minecraft/modpacks/[A-Za-z0-9_-]+/files/[1-9][0-9]{0,12}/?",parsed.path)):
+                raise HTTPException(400,"Use a specific CurseForge modpack file URL")
+            old_project=previous_url.path.split("/")
+            new_project=parsed.path.split("/")
+            if len(old_project)<4 or old_project[3]!=new_project[3]:
+                raise HTTPException(400,"The update must be for the same CurseForge modpack")
+            if cf_url==meta["cf_url"]:
+                raise HTTPException(400,"That CurseForge file is already selected")
+            old_id=re.search(r"/files/([0-9]+)",meta["cf_url"])
+            new_id=re.search(r"/files/([0-9]+)",cf_url)
+            meta["pack_update_notice"]={
+                "type":"curseforge",
+                "previous":old_id.group(1) if old_id else "previous release",
+                "current":new_id.group(1),
+                "message":"Update the CurseForge client profile to the new pinned file version before joining.",
+            }
+            meta["cf_url"]=cf_url
+        write_meta(meta)
+        # Do not restart here; the existing game keeps serving its old pack.
+        return state(meta)
+
 
 class ModChanges(BaseModel):
     # Treat each entry as a complete desired plan; validate all entries against
