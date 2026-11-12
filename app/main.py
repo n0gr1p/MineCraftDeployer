@@ -304,7 +304,8 @@ def get_or_create_container(meta):
             (minecraft_env(c).get("MCD_MOD_REVISION") not in
                 (mod_compat.runtime_signature(meta), None if not mod_compat.runtime_changes(meta) else "")))
         source_mismatch=pack_source_pending(c,meta)
-        java_mismatch=c.attrs.get("Config",{}).get("Image")!=f"itzg/minecraft-server:java{meta.get('java_version',21)}"
+        container_image=c.attrs.get("Config",{}).get("Image")
+        java_mismatch=bool(container_image and container_image!=f"itzg/minecraft-server:java{meta.get('java_version',21)}")
         if (ports!={str(GAME_PORT)} or incompatible_security or not player_controls_ready(c)
                 or ram_mismatch or settings_pending(c,meta) or mod_mismatch
                 or source_mismatch or java_mismatch):
@@ -515,10 +516,10 @@ def state(meta):
             "mod_count":meta.get("mod_count"),
             "mod_change_count":len(meta.get("mod_changes",[])),
             "pack_update_notice":meta.get("pack_update_notice"),
-            "pack_update_pending":bool(c and (
+            "pack_update_pending":bool(c and meta.get("pack_update_notice") and (
                 pack_source_pending(c,meta) or (
                 meta.get("mode")=="curseforge_zip" and
-                minecraft_env(c).get("MCD_MOD_REVISION")!=mod_compat.runtime_signature(meta)))) ,
+                minecraft_env(c).get("MCD_MOD_REVISION")!=mod_compat.runtime_signature(meta)))),
             "client_updates":mod_compat.client_notices(meta) if meta.get("mode")=="curseforge_zip" else [],
             "mod_changes_pending":bool(meta.get("mode")=="curseforge_zip" and c and
                 (minecraft_env(c).get("MCD_MOD_REVISION") not in
