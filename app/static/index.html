@@ -31,7 +31,7 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.mod-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.mod-panel,.pack-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
     .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
     .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
     .setting-field label{margin:0 0 6px;font-size:.9rem}
@@ -48,6 +48,8 @@
     .delete-panel label{margin:0}
     .ram-panel input{max-width:125px}
     .ram-panel label{margin:0}
+    .pack-panel input{max-width:100%}
+    .pack-panel small{display:block;margin-top:7px}
     .ram-panel .help{margin:8px 0}
     .player-line{padding:8px 0;border-bottom:1px solid #36505f;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .player-line:last-child{border-bottom:0}
@@ -145,7 +147,7 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openModId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openModId=null,openPackId=null;
     const modInfo={};
     const consoleOutputs={};
     const $=id=>document.getElementById(id);
@@ -161,7 +163,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.modButton')){
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.modButton,.packButton,.downloadButton')){
         const confirmation=btn.closest('.delete-panel')?.querySelector('input');
         btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
       }
@@ -667,6 +669,116 @@
       panel.append(footer);
       return panel;
     }
+
+    async function downloadWorld(s){
+      if(busy)return;
+      const filename=s.name.replace(/[^A-Za-z0-9_-]+/g,'-')+'-world.zip';
+      let writer=null;
+      try{
+        if(window.showSaveFilePicker){
+          const handle=await window.showSaveFilePicker({
+            suggestedName:filename,
+            types:[{description:'Minecraft world ZIP',accept:{'application/zip':['.zip']}}]
+          });
+          writer=await handle.createWritable();
+        }
+      }catch(error){
+        if(error.name==='AbortError')return;
+        message(error.message);return;
+      }
+      setBusy(true);message('Preparing world ZIP. Keep the game stopped during the export…');
+      try{
+        const response=await fetch('/api/servers/'+s.id+'/world/download',{
+          headers:{Authorization:'Bearer '+token}
+        });
+        if(!response.ok){
+          let details=await response.json().catch(()=>({detail:'Download failed'}));
+          throw Error(details.detail||'World download failed');
+        }
+        if(writer&&response.body){
+          const reader=response.body.getReader();
+          while(true){
+            const chunk=await reader.read();
+            if(chunk.done)break;
+            await writer.write(chunk.value);
+          }
+          await writer.close();writer=null;
+        }else{
+          // HTTP/LAN or older browsers may lack the secure-context streaming
+          // file picker. Fall back to an authenticated browser Blob download.
+          const blob=await response.blob();
+          if(writer){await writer.write(blob);await writer.close();writer=null}
+          else{
+            const link=document.createElement('a');
+            const href=URL.createObjectURL(blob);
+            link.href=href;link.download=filename;
+            document.body.append(link);link.click();link.remove();
+            setTimeout(()=>URL.revokeObjectURL(href),60000);
+          }
+        }
+        message('World ZIP downloaded. The server save was not modified.');
+      }catch(error){
+        if(writer)try{await writer.abort()}catch(_){}
+        message(error.message);
+      }finally{setBusy(false);paint()}
+    }
+    async function savePackUpdate(s,form){
+      if(busy)return;
+      if(!confirm('Stage a new modpack for '+s.name+'? The existing world will be preserved, and Minecraft will NOT restart now. Back up the world before switching versions. Players must update their clients to match.'))return;
+      setBusy(true);message('Validating and saving the new modpack. The game will not restart…');
+      try{
+        const body=new FormData(form);
+        for(const key of ['pack'])if(!body.get(key)?.size)body.delete(key);
+        const response=await fetch('/api/servers/'+s.id+'/pack-update',{
+          method:'POST',headers:{Authorization:'Bearer '+token},body
+        });
+        const result=await response.json();
+        if(!response.ok)throw Error(result.detail||'Modpack update failed');
+        openPackId=null;
+        await refresh(true);
+        message('Modpack update saved for '+s.name+'. It will apply on the next deliberate Minecraft restart. Ask players to update their clients first.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function packPanel(s){
+      const panel=document.createElement('div');
+      panel.className='pack-panel';panel.hidden=openPackId!==s.id;
+      if(panel.hidden)return panel;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Stage a new modpack revision without replacing the world or restarting Minecraft. Download the stopped world first. The next explicit game restart applies the change; players should update their clients to match.';
+      panel.append(help);
+      const form=document.createElement('form');
+      if(s.mode==='curseforge_zip'){
+        const label=document.createElement('label');
+        label.textContent='New customized CurseForge export ZIP (same Minecraft version and loader family)';
+        const input=document.createElement('input');
+        input.name='pack';input.type='file';input.accept='.zip';input.required=true;
+        label.append(input);form.append(label);
+        const note=document.createElement('small');note.className='muted';
+        note.textContent='Your existing world, whitelist, and mod compatibility rules remain. The previous ZIP is archived for recovery. For Minecraft major-version changes, create a separate server profile.';
+        form.append(note);
+      }else if(s.mode==='ftb'){
+        const label=document.createElement('label');
+        label.textContent='New pinned FTB version ID';
+        const input=document.createElement('input');
+        input.name='ftb_version_id';input.required=true;
+        input.type='number';input.min='1';input.step='1';input.placeholder=String(s.ftb_version_id);
+        label.append(input);form.append(label);
+      }else{
+        const label=document.createElement('label');
+        label.textContent='New CurseForge modpack file URL';
+        const input=document.createElement('input');
+        input.name='cf_url';input.required=true;input.type='url';
+        input.placeholder='https://www.curseforge.com/minecraft/modpacks/.../files/1234';
+        label.append(input);form.append(label);
+      }
+      const button=document.createElement('button');
+      button.type='submit';button.textContent='Stage modpack update';
+      button.className='secondary packButton';form.append(button);
+      form.onsubmit=e=>{e.preventDefault();savePackUpdate(s,form)};
+      panel.append(form);
+      return panel;
+    }
     function paint(){
       const selectedBefore=$('serverSelect').value;
       const current=active();
@@ -713,6 +825,33 @@
         ramBtn.classList.add('ramButton');
         ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
         box.append(title,details,logs,playersBtn,ramBtn);
+        const downloadBtn=actionButton('Download World ZIP','secondary',()=>downloadWorld(s),s.status==='running'||s.status==='restarting'||s.status==='paused');
+        downloadBtn.classList.add('downloadButton');
+        downloadBtn.title=s.status==='running'?'Stop Minecraft first for a consistent world download':'Download this saved world without changing the profile';
+        box.append(downloadBtn);
+        if(s.status==='running'){
+          const saveNote=document.createElement('small');saveNote.className='muted';
+          saveNote.textContent='Stop this game before downloading its world to avoid capturing incomplete chunks.';
+          box.append(saveNote);
+        }
+        if(['curseforge_zip','ftb','curseforge'].includes(s.mode)){
+          const packBtn=actionButton('Update modpack','secondary',()=>{
+            openPackId=openPackId===s.id?null:s.id;paint();
+          });
+          packBtn.classList.add('packButton');
+          box.append(packBtn);
+          if(s.pack_update_pending){
+            const notice=document.createElement('p');notice.className='mod-warning';
+            notice.textContent='Modpack update staged; applies on next Minecraft restart. Players should update their clients before joining.';
+            box.append(notice);
+          }
+          if(s.pack_update_notice){
+            const notice=document.createElement('p');notice.className='mod-notice';
+            notice.textContent='Modpack update: '+s.pack_update_notice.previous+' → '+s.pack_update_notice.current+'. '+s.pack_update_notice.message;
+            box.append(notice);
+          }
+          box.append(packPanel(s));
+        }
         const settingsBtn=actionButton('Settings','secondary',()=>{
           openSettingsId=openSettingsId===s.id?null:s.id;paint();
         });
