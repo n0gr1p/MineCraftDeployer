@@ -295,6 +295,25 @@ sudo docker pull itzg/minecraft-server:java8
 
 This only downloads the image; it doesn't stop the existing Minecraft server. Initial Forge installation may also download Forge libraries at runtime. **Live acceptance with the actual 644.8 MB ZIP is still pending**; tests use minimal simulated server packs and a fake Docker daemon.
 
+
+### Download an existing world
+
+Every installed profile now offers **Download World ZIP**. For a consistent download, **stop that Minecraft server first** in the portal (you can start it again afterward). The download requires your existing portal access token and contains the saved world folder's `level.dat`, `region/`, `playerdata/` and other world data. It does not regenerate the world or touch server profiles.
+
+The portal determines the save folder from `server.properties` (`level-name`) or the profile's explicit `world_name`, verifies paths, rejects symlinks/special files, and requires sufficient free disk space before building the ZIP. The download ZIP is staged temporarily outside the game data directory and deleted once transferred. An uploaded modpack is not included; use your existing client modpack export when restoring the world.
+
+When the portal is accessed over HTTP (rather than HTTPS), supported browsers fall back to a normal Blob download, which may consume considerable browser RAM for large worlds. An HTTPS origin with a compatible browser can use streaming downloads via the File System Access API. If the world is too large to download comfortably in the browser, copy the stopped save directly from the server's data folder using your preferred file-transfer utility.
+
+### Update an installed modpack without recreating its world
+
+The **Update modpack** control works for:
+
+- **Customized CurseForge ZIP:** Upload a new CurseForge export for the **same Minecraft version and loader family**. The server retains its installed world, whitelist, player privileges, RAM and mod-compatibility rules. The previous source ZIP is retained under `minecraft/.mcd/pack-history/` for recovery, while the currently selected ZIP is replaced. Existing explicit mod version/exclusion rules are checked against the new manifest and re-applied. Updating the Minecraft game version or changing the loader family requires a separate profile.
+- **FTB:** Enter a new numeric FTB **version ID** of the same modpack; the existing pinned FTB pack ID is not changed. The new installer version is used at the next deliberate restart.
+- **CurseForge URL installs:** Enter an HTTPS URL to a specific newer **file** of the same CurseForge modpack. Generic URLs for another modpack are refused.
+
+**No installation update automatically stops or restarts an existing game.** The portal stores the intended pack release and shows **Modpack update staged** until the next intentional game restart. It also displays a persistent client-update instruction telling players to install the corresponding revised pack before joining. Changes to the mod set and game loaders can still be incompatible with an existing world. Download the stopped world first, verify the client version, and test after restarting. The portal cannot reliably determine whether an FTB or CurseForge update is compatible without launching the changed game.
+
 ### Select, start, stop, restart, and inspect logs
 
 - **Make Active:** selects an installed server and starts it on the fixed game port. If another profile is running, it is stopped first. Wait for Minecraft to become ready.
