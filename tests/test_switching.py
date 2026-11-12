@@ -1542,3 +1542,241 @@ def test_tampered_derived_overrides_are_detected_before_server_switch(environmen
     assert environment.containers.items[current].status=="running"
     assert portal.active_id()==current
 
+
+
+def test_world_download_of_stopped_profile_preserves_region_and_playerdata(environment):
+    sid=install_profile(portal.ROOT,126)
+    world=portal.ROOT/sid/"minecraft"/"world"
+    (world/"region").mkdir(parents=True)
+    (world/"playerdata").mkdir()
+    (world/"level.dat").write_bytes(b"Original world data")
+    (world/"region"/"r.0.0.mca").write_bytes(b"Map terrain")
+    (world/"playerdata"/"uid.dat").write_bytes(b"User data")
+    with TestClient(portal.app) as http:
+        response=http.get(f"/api/servers/{sid}/world/download",
+            headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert response.status_code==200,response.text[:500]
+    assert response.headers["content-type"]=="application/zip"
+    assert "Pack-126-world.zip" in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+        assert z.read("world/level.dat")==b"Original world data"
+        assert z.read("world/region/r.0.0.mca")==b"Map terrain"
+        assert z.read("world/playerdata/uid.dat")==b"User data"
+    assert (world/"level.dat").read_bytes()==b"Original world data"
+    assert not list(portal.ROOT.glob(".mcd-world-export-*.zip"))
+
+
+def test_world_download_refuses_running_server_without_stopping_it(environment):
+    sid=install_profile(portal.ROOT,127)
+    data=portal.ROOT/sid/"minecraft"/"world"
+    data.mkdir()
+    (data/"level.dat").write_bytes(b"safe")
+    portal.activate(sid)
+    with TestClient(portal.app) as http:
+        response=http.get(f"/api/servers/{sid}/world/download",
+            headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert response.status_code==409
+    assert "Stop this Minecraft server" in response.json()["detail"]
+    assert environment.containers.items[sid].status=="running"
+    portal.stop_active(sid)
+    with TestClient(portal.app) as http:
+        response=http.get(f"/api/servers/{sid}/world/download",
+            headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert response.status_code==200
+
+
+def test_world_download_uses_world_name_from_server_properties(environment):
+    sid=install_profile(portal.ROOT,128)
+    data=portal.ROOT/sid/"minecraft"
+    (data/"server.properties").write_text("level-name=FriendsSave\npvp=true\n")
+    world=data/"FriendsSave"
+    world.mkdir()
+    (world/"level.dat").write_bytes(b"custom-save")
+    with TestClient(portal.app) as http:
+        response=http.get(f"/api/servers/{sid}/world/download",
+            headers={"Authorization":"Bearer "+portal.TOKEN})
+    assert response.status_code==200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+        assert z.read("FriendsSave/level.dat")==b"custom-save"
+
+
+def test_world_download_blocks_symlinks_and_unsafe_world_names(environment,tmp_path):
+    sid=install_profile(portal.ROOT,129)
+    data=portal.ROOT/sid/"minecraft"
+    world=data/"world"
+    world.mkdir()
+    (world/"level.dat").write_bytes(b"safe")
+    (world/"escape").symlink_to(tmp_path)
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        response=http.get(f"/api/servers/{sid}/world/download",headers=auth)
+        assert response.status_code==409
+        assert "symlink" in response.json()["detail"]
+        (world/"escape").unlink()
+        (data/"server.properties").write_text("level-name=../../etc\n")
+        response=http.get(f"/api/servers/{sid}/world/download",headers=auth)
+        assert response.status_code==409
+        assert "unsafe" in response.json()["detail"]
+
+
+def test_world_download_requires_portal_authorization(environment):
+    sid=install_profile(portal.ROOT,130)
+    with TestClient(portal.app) as http:
+        assert http.get(f"/api/servers/{sid}/world/download").status_code==401
+
+
+def test_custom_modpack_update_keeps_world_players_and_running_game(environment):
+    sid=install_custom_mod_profile(environment)
+    data=portal.ROOT/sid/"minecraft"
+    (data/"world").mkdir()
+    (data/"world"/"level.dat").write_bytes(b"irreplaceable level data")
+    before=portal.meta_for(sid)
+    original=(data/".mcd"/"curseforge-pack.zip").read_bytes()
+    portal.activate(sid)
+    old_container=environment.containers.items[sid]
+    upgraded=custom_curseforge_export(mods=[
+        {"projectID":606989,"fileID":9009764,"required":True},
+        {"projectID":699872,"fileID":8920440,"required":True},
+        {"projectID":809311,"fileID":8919465,"required":False},
+    ])
+    with TestClient(portal.app) as http:
+        response=http.post(f"/api/servers/{sid}/pack-update",
+            headers={"Authorization":"Bearer "+portal.TOKEN},
+            files={"pack":("updated-custom.zip",upgraded,"application/zip")})
+    assert response.status_code==200,response.text
+    assert environment.containers.items[sid] is old_container
+    assert old_container.status=="running"
+    assert (data/"world"/"level.dat").read_bytes()==b"irreplaceable level data"
+    assert response.json()["whitelist"]==before["whitelist"]
+    assert response.json()["pack_update_pending"] is True
+    assert response.json()["pack_update_notice"]["type"]=="curseforge_zip"
+    assert (data/".mcd"/"curseforge-pack.zip").read_bytes()==upgraded
+    assert (data/".mcd"/"pack-history"/(before["pack_sha256"]+".zip")).read_bytes()==original
+    assert portal.meta_for(sid)["pack_sha256"]==hashlib.sha256(upgraded).hexdigest()
+    portal.restart_active(sid)
+    assert environment.containers.items[sid] is not old_container
+    assert portal.state(portal.meta_for(sid))["pack_update_pending"] is False
+
+
+def test_custom_modpack_update_reapplies_existing_mod_compatibility_rules(environment):
+    sid=install_custom_mod_profile(environment)
+    path=portal.ROOT/sid/"minecraft"/".mcd"
+    rule={"project_id":606989,"name":"CreativeCore","action":"replace",
+          "replacement_file_id":9009764,"server_version":"2.14.18"}
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        saved=http.put(f"/api/servers/{sid}/mods",headers=auth,json={"changes":[rule]})
+        assert saved.status_code==200,saved.text
+        upgraded=custom_curseforge_export(mods=[
+            {"projectID":606989,"fileID":9018523,"required":True},
+            {"projectID":699872,"fileID":8920441,"required":True},
+            {"projectID":809311,"fileID":8919466,"required":False},
+        ])
+        response=http.post(f"/api/servers/{sid}/pack-update",
+            headers=auth,files={"pack":("new.zip",upgraded,"application/zip")})
+    assert response.status_code==200,response.text
+    assert response.json()["client_updates"][0]["name"]=="CreativeCore"
+    with zipfile.ZipFile(path/"curseforge-effective.zip") as zipfile_obj:
+        manifest=json.loads(zipfile_obj.read("manifest.json"))
+    ids={entry["projectID"]:entry["fileID"] for entry in manifest["files"]}
+    assert ids[606989]==9009764
+    assert ids[699872]==8920441
+    assert portal.meta_for(sid)["effective_sha256"]==hashlib.sha256((path/"curseforge-effective.zip").read_bytes()).hexdigest()
+    portal.activate(sid)
+    env=environment.containers.creations[-1]["environment"]
+    assert env["CF_MODPACK_ZIP"]=="/data/.mcd/curseforge-effective.zip"
+
+
+def test_reject_incompatible_custom_pack_upgrade_without_changing_data(environment):
+    sid=install_custom_mod_profile(environment)
+    data=portal.ROOT/sid/"minecraft"
+    source=data/".mcd"/"curseforge-pack.zip"
+    original=source.read_bytes()
+    old_meta=portal.meta_for(sid)
+    for replacement in [
+        custom_curseforge_export(version="26.4"),
+        custom_curseforge_export(version="26.3",loader="neoforge-22.1.0"),
+    ]:
+        with TestClient(portal.app) as http:
+            response=http.post(f"/api/servers/{sid}/pack-update",
+                headers={"Authorization":"Bearer "+portal.TOKEN},
+                files={"pack":("wrong.zip",replacement,"application/zip")})
+        assert response.status_code==400,response.text
+        assert "changes Minecraft version or loader family" in response.json()["detail"]
+        assert source.read_bytes()==original
+        assert portal.meta_for(sid)==old_meta
+
+
+def test_custom_pack_upgrade_rejects_omission_of_required_mod_rule(environment):
+    sid=install_custom_mod_profile(environment)
+    source=portal.ROOT/sid/"minecraft"/".mcd"/"curseforge-pack.zip"
+    original=source.read_bytes()
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        added=http.put(f"/api/servers/{sid}/mods",headers=auth,
+            json={"changes":[{"project_id":606989,"name":"CreativeCore","action":"exclude"}]})
+        assert added.status_code==200,added.text
+        new_pack=custom_curseforge_export(mods=[
+            {"projectID":699872,"fileID":9029000,"required":True}
+        ])
+        response=http.post(f"/api/servers/{sid}/pack-update",
+            headers=auth,files={"pack":("removed-mod.zip",new_pack,"application/zip")})
+    assert response.status_code==400,response.text
+    assert source.read_bytes()==original
+
+
+def test_ftb_pinned_version_update_queues_recreation_without_restart(environment):
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        created=http.post("/api/servers",headers=auth,data={
+            "name":"FTB Evolution 2","players":"TestPlayer","ram_gb":"8",
+            "ftb_url":"https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2",
+            "ftb_version_id":"100566","ftb_java_version":"25"})
+        assert created.status_code==200,created.text
+        sid=created.json()["id"]
+        portal.activate(sid)
+        previous=environment.containers.items[sid]
+        res=http.post(f"/api/servers/{sid}/pack-update",
+            headers=auth,data={"ftb_version_id":"100567"})
+    assert res.status_code==200,res.text
+    assert res.json()["pack_update_pending"] is True
+    assert res.json()["pack_update_notice"]["previous"]=="100566"
+    assert previous.status=="running"
+    assert environment.containers.items[sid] is previous
+    portal.restart_active(sid)
+    assert environment.containers.creations[-1]["environment"]["FTB_MODPACK_VERSION_ID"]=="100567"
+    assert environment.containers.items[sid] is not previous
+
+
+def test_curseforge_file_url_upgrade_is_pinned_to_same_project(environment):
+    sid=install_profile(portal.ROOT,131)
+    meta=portal.meta_for(sid)
+    meta["mode"]="curseforge"
+    meta["cf_url"]="https://www.curseforge.com/minecraft/modpacks/example-pack/files/123456"
+    (portal.ROOT/sid/"meta.json").write_text(json.dumps(meta))
+    portal.activate(sid)
+    old=environment.containers.items[sid]
+    headers={"Authorization":"Bearer "+portal.TOKEN}
+    with TestClient(portal.app) as http:
+        bad=http.post(f"/api/servers/{sid}/pack-update",headers=headers,
+            data={"cf_url":"https://www.curseforge.com/minecraft/modpacks/different/files/333333"})
+        assert bad.status_code==400
+        good=http.post(f"/api/servers/{sid}/pack-update",headers=headers,
+            data={"cf_url":"https://www.curseforge.com/minecraft/modpacks/example-pack/files/654321"})
+    assert good.status_code==200,good.text
+    assert good.json()["pack_update_pending"] is True
+    assert old.status=="running"
+    portal.restart_active(sid)
+    assert environment.containers.items[sid] is not old
+    assert environment.containers.creations[-1]["environment"]["CF_PAGE_URL"].endswith("/files/654321")
+
+
+def test_pack_update_requires_auth_and_supported_mode(environment):
+    sid=install_custom_mod_profile(environment)
+    other=install_profile(portal.ROOT,132)
+    with TestClient(portal.app) as http:
+        assert http.post(f"/api/servers/{sid}/pack-update").status_code==401
+        unsupported=http.post(f"/api/servers/{other}/pack-update",
+            headers={"Authorization":"Bearer "+portal.TOKEN},data={"ftb_version_id":"12345"})
+        assert unsupported.status_code==409
+
