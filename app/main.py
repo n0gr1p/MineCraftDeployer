@@ -674,13 +674,18 @@ async def update_pack(sid:str,pack:UploadFile|None=File(None),
                 old_manifest=mod_compat.source_manifest(source)
                 new_manifest=mod_compat.source_manifest(staged)
                 mod_compat.validate_changes(new_manifest,meta.get("mod_changes",[]))
-                new_sha=hashlib.sha256(staged.read_bytes()).hexdigest()
+                with staged.open("rb") as stream:
+                    new_sha=hashlib.file_digest(stream,"sha256").hexdigest()
                 if new_sha==meta["pack_sha256"]:
                     raise ValueError("This is the same custom modpack already installed")
                 history=source.parent/"pack-history"
                 history.mkdir(exist_ok=True)
                 previous=history/(meta["pack_sha256"]+".zip")
-                if not previous.exists():
+                if previous.exists():
+                    with previous.open("rb") as handle:
+                        if hashlib.file_digest(handle,"sha256").hexdigest()!=meta["pack_sha256"]:
+                            raise ValueError("Previous-pack backup checksum is invalid")
+                else:
                     shutil.copy2(source,previous)
                 old=meta.copy()
                 try:
