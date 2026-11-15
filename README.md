@@ -296,6 +296,14 @@ sudo docker pull itzg/minecraft-server:java8
 This only downloads the image; it doesn't stop the existing Minecraft server. Initial Forge installation may also download Forge libraries at runtime. **Live acceptance with the actual 644.8 MB ZIP is still pending**; tests use minimal simulated server packs and a fake Docker daemon.
 
 
+### CurseForge modpacks: Java runtime and Docker image preflight
+
+For **CurseForge URL** installations, select the Java version required by the pack under the URL field. **All the Mods 11** is built for Minecraft **26.1.2** / NeoForge and requires **Java 25**, not Java 21. Existing CurseForge URL and FTB profiles also have an **Edit Java runtime** control; saving changes does not immediately restart Minecraft or delete the world.
+
+If the Docker runtime image (for example, `itzg/minecraft-server:java25`) is missing, the portal automatically pulls it **before switching away from an already-running Minecraft server**. If the pull fails, the existing server stays running and the portal reports the error. This corrects the previous `404 ... No such image: itzg/minecraft-server:java21` failure without requiring direct Docker commands, provided the chosen Java version matches the modpack.
+
+When a running profile changes Java, the next explicit restart creates a new container using the selected Java image and preserves its bind-mounted world data. The Java selection is manual for URL-based installs because the URL alone does not reliably identify the required Minecraft version; custom CurseForge **ZIP** imports continue to infer Java from the uploaded manifest.
+
 ### Download an existing world
 
 Every installed profile now offers **Download World ZIP**. For a consistent download, **stop that Minecraft server first** in the portal (you can start it again afterward). The download requires your existing portal access token and contains the saved world folder's `level.dat`, `region/`, `playerdata/` and other world data. It does not regenerate the world or touch server profiles.
