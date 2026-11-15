@@ -102,9 +102,33 @@ class FakeContainers:
         return c
 
 
+class FakeImageStore:
+    def __init__(self,containers):
+        self.containers=containers
+        self.present={f"itzg/minecraft-server:java{n}" for n in (8,17,21,25)}
+        self.pulls=[]
+        self.fail_pull=False
+
+    def get(self,tag):
+        if tag not in self.present:
+            raise docker.errors.ImageNotFound("No such image: "+tag)
+        return SimpleNamespace(tags=[tag])
+
+    def pull(self,tag):
+        if self.fail_pull:
+            raise docker.errors.APIError("Registry download failed")
+        # Record which previously selected Minecraft servers were still alive
+        # while the missing runtime image was being downloaded.
+        running=[sid for sid,c in self.containers.items.items() if c.status=="running"]
+        self.pulls.append((tag,running))
+        self.present.add(tag)
+        return SimpleNamespace(tags=[tag])
+
+
 class FakeClient:
     def __init__(self):
         self.containers=FakeContainers()
+        self.images=FakeImageStore(self.containers)
 
 
 @pytest.fixture
@@ -1779,4 +1803,128 @@ def test_pack_update_requires_auth_and_supported_mode(environment):
         unsupported=http.post(f"/api/servers/{other}/pack-update",
             headers={"Authorization":"Bearer "+portal.TOKEN},data={"ftb_version_id":"12345"})
         assert unsupported.status_code==409
+
+
+
+def test_atm11_curseforge_url_uses_selected_java25_and_preserves_profile(environment):
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        create=http.post("/api/servers",headers=auth,data={
+            "name":"All the Mods 11","ram_gb":"8","players":"TestPlayer",
+            "cf_url":"https://www.curseforge.com/minecraft/modpacks/all-the-mods-11",
+            "cf_java_version":"25"
+        })
+    assert create.status_code==200,create.text
+    sid=create.json()["id"]
+    assert create.json()["java_version"]==25
+    portal.activate(sid)
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java25"
+    assert environment.containers.creations[-1]["environment"]["TYPE"]=="AUTO_CURSEFORGE"
+    assert portal.meta_for(sid)["java_version"]==25
+
+
+def test_existing_curseforge_profile_can_fix_legacy_java21_without_deleting_it(environment):
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        create=http.post("/api/servers",headers=auth,data={
+            "name":"ATM11 old profile","ram_gb":"8","players":"TestPlayer",
+            "cf_url":"https://www.curseforge.com/minecraft/modpacks/all-the-mods-11"
+        })
+        assert create.status_code==200
+        sid=create.json()["id"]
+        assert create.json()["java_version"]==21
+        denied=http.patch(f"/api/servers/{sid}/java",json={"java_version":25})
+        assert denied.status_code==401
+        invalid=http.patch(f"/api/servers/{sid}/java",headers=auth,json={"java_version":22})
+        assert invalid.status_code==422
+        fixed=http.patch(f"/api/servers/{sid}/java",headers=auth,json={"java_version":25})
+        assert fixed.status_code==200,fixed.text
+        assert fixed.json()["java_version"]==25
+        assert fixed.json()["status"]=="not-created"
+    assert portal.meta_for(sid)["java_version"]==25
+    portal.activate(sid)
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java25"
+
+
+def test_java_change_is_deferred_when_server_running_and_recreates_at_restart(environment):
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        create=http.post("/api/servers",headers=auth,data={
+            "name":"Existing pack","ram_gb":"8","players":"TestPlayer",
+            "cf_url":"https://www.curseforge.com/minecraft/modpacks/test-pack",
+            "cf_java_version":"21"
+        })
+        sid=create.json()["id"]
+        portal.activate(sid)
+        old=environment.containers.items[sid]
+        assert old.status=="running"
+        saved=http.patch(f"/api/servers/{sid}/java",headers=auth,json={"java_version":25})
+        assert saved.status_code==200,saved.text
+        assert saved.json()["java_version"]==25
+        assert old.status=="running"
+        assert len(environment.containers.creations)==1
+    portal.restart_active(sid)
+    assert environment.containers.items[sid] is not old
+    assert environment.containers.images[-1]=="itzg/minecraft-server:java25"
+
+
+def test_missing_java25_image_pulled_before_stopping_previous_server(environment):
+    old=install_profile(portal.ROOT,145)
+    portal.activate(old)
+    assert environment.containers.items[old].status=="running"
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        created=http.post("/api/servers",headers=auth,data={
+            "name":"ATM11","ram_gb":"8","players":"TestPlayer",
+            "cf_url":"https://www.curseforge.com/minecraft/modpacks/all-the-mods-11",
+            "cf_java_version":"25"
+        })
+        sid=created.json()["id"]
+    environment.images.present.remove("itzg/minecraft-server:java25")
+    portal.activate(sid)
+    assert environment.images.pulls==[("itzg/minecraft-server:java25",[old])]
+    assert environment.containers.items[sid].status=="running"
+
+
+def test_failed_java_image_pull_does_not_stop_current_world(environment):
+    old=install_profile(portal.ROOT,146)
+    portal.activate(old)
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        created=http.post("/api/servers",headers=auth,data={
+            "name":"ATM11","ram_gb":"8","players":"TestPlayer",
+            "cf_url":"https://www.curseforge.com/minecraft/modpacks/all-the-mods-11",
+            "cf_java_version":"25"
+        })
+        sid=created.json()["id"]
+    environment.images.present.remove("itzg/minecraft-server:java25")
+    environment.images.fail_pull=True
+    with pytest.raises(HTTPException) as issue:
+        portal.activate(sid)
+    assert issue.value.status_code==409
+    assert "Cannot download the required Docker image" in issue.value.detail
+    assert environment.containers.items[old].status=="running"
+    assert portal.active_id()==old
+    assert sid not in environment.containers.items
+
+
+def test_java_change_unsupported_on_custom_manifest_and_server_jar(environment):
+    sid=install_custom_mod_profile(environment)
+    plain=install_profile(portal.ROOT,147)
+    with TestClient(portal.app) as http:
+        auth={"Authorization":"Bearer "+portal.TOKEN}
+        for target in [sid,plain]:
+            response=http.patch(f"/api/servers/{target}/java",headers=auth,
+                json={"java_version":25})
+            assert response.status_code==409
+
+
+def test_curseforge_invalid_java_selection_rejected_before_creating_profile(environment):
+    with TestClient(portal.app) as http:
+        bad=http.post("/api/servers",headers={"Authorization":"Bearer "+portal.TOKEN},
+            data={"name":"Invalid Java","ram_gb":"8","players":"TestPlayer",
+                  "cf_url":"https://www.curseforge.com/minecraft/modpacks/all-the-mods-11",
+                  "cf_java_version":"22"})
+        assert bad.status_code==400
+    assert not list(portal.ROOT.glob("*/meta.json"))
 
