@@ -31,7 +31,7 @@
     .server{border-top:1px solid #46606a;padding:15px 0}
     .server:first-child{border-top:0}
     .server-name{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .player-panel,.ram-panel,.delete-panel,.settings-panel,.console-panel,.mod-panel,.pack-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
+    .player-panel,.ram-panel,.java-panel,.delete-panel,.settings-panel,.console-panel,.mod-panel,.pack-panel{border:1px solid #46606a;border-radius:10px;padding:12px;margin-top:10px}
     .setting-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:12px 0}
     .setting-field{background:#11222c;border:1px solid #405966;border-radius:9px;padding:11px}
     .setting-field label{margin:0 0 6px;font-size:.9rem}
@@ -115,6 +115,16 @@
         <p class="muted help">Choose <strong>one</strong> source: CurseForge URL, FTB URL, or ZIP (server pack / custom CurseForge export).</p>
         <label for="cfUrl">CurseForge modpack URL</label>
         <input id="cfUrl" name="cf_url" type="url" placeholder="https://www.curseforge.com/minecraft/modpacks/...">
+        <div id="cfOptions" hidden>
+          <label for="cfJava">Java runtime required by this CurseForge modpack</label>
+          <select id="cfJava" name="cf_java_version">
+            <option value="25">Java 25 — Minecraft 26.x / All the Mods 11</option>
+            <option value="21" selected>Java 21 — Minecraft 1.20.5–1.21.x</option>
+            <option value="17">Java 17 — Minecraft 1.17–1.20.4</option>
+            <option value="8">Java 8 — older modpacks</option>
+          </select>
+          <p class="muted help">Use Java 25 for All the Mods 11 (Minecraft 26.1.2), not Java 21. The portal downloads the Docker runtime image when you activate the server.</p>
+        </div>
         <label for="ftbUrl">OR Feed The Beast (FTB) modpack URL</label>
         <input id="ftbUrl" name="ftb_url" type="url" placeholder="https://www.feed-the-beast.com/modpacks/135-ftb-evolution-2">
         <div id="ftbOptions" hidden>
@@ -147,7 +157,7 @@
   </main>
   <p id="status" class="status" role="status"></p>
   <script>
-    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openModId=null,openPackId=null;
+    let token='', servers=[], busy=false,openPlayersId=null,openRamId=null,openDeleteId=null,openSettingsId=null,openConsoleId=null,openModId=null,openPackId=null,openJavaId=null;
     const modInfo={};
     const consoleOutputs={};
     const $=id=>document.getElementById(id);
@@ -163,7 +173,7 @@
       busy=value;
       for(const id of ['activate','start','stop','restart','refresh'])
         $(id).disabled=value;
-      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.deleteButton,.settingsButton,.consoleButton,.modButton,.packButton,.downloadButton')){
+      for(const btn of document.querySelectorAll('.logsButton,.playerButton,.ramButton,.javaButton,.deleteButton,.settingsButton,.consoleButton,.modButton,.packButton,.downloadButton')){
         const confirmation=btn.closest('.delete-panel')?.querySelector('input');
         btn.disabled=value||(!!confirmation&&confirmation.value!==btn.dataset.confirmName);
       }
@@ -670,6 +680,50 @@
       return panel;
     }
 
+    async function saveJava(s,javaVersion){
+      if(busy)return;
+      if(s.java_version===javaVersion){message('Java runtime is already '+javaVersion+'.');return}
+      if(!confirm('Change '+s.name+' to Java '+javaVersion+'? The game will not restart until you explicitly start, restart or activate this profile.'))return;
+      setBusy(true);
+      message('Saving Java '+javaVersion+' for '+s.name+'…');
+      try{
+        await request('/servers/'+s.id+'/java',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({java_version:javaVersion})
+        });
+        await refresh(true);
+        message('Java '+javaVersion+' saved. On the next activation, the portal will fetch the Docker image if needed before switching servers.');
+      }catch(error){message(error.message)}
+      finally{setBusy(false);paint()}
+    }
+    function javaPanel(s){
+      const panel=document.createElement('div');
+      panel.className='java-panel';panel.hidden=openJavaId!==s.id;
+      if(panel.hidden)return panel;
+      const help=document.createElement('p');help.className='help muted';
+      help.textContent='Change the Java version for this installed modpack without deleting the world or creating a new profile. All the Mods 11 requires Java 25. No automatic game restart.';
+      panel.append(help);
+      const form=document.createElement('form');
+      const label=document.createElement('label');label.textContent='Java runtime';
+      const select=document.createElement('select');
+      for(const v of [25,21,17,8]){
+        const opt=document.createElement('option');opt.value=String(v);
+        opt.textContent='Java '+v+(v===25?' (Minecraft 26.x / ATM11)':'');
+        select.append(opt);
+      }
+      select.value=String(s.java_version);
+      const button=document.createElement('button');button.type='submit';
+      button.className='secondary javaButton';button.textContent='Save Java version';
+      label.append(select);form.append(label,button);
+      form.onsubmit=e=>{e.preventDefault();saveJava(s,Number(select.value))};
+      panel.append(form);
+      if(s.java_change_pending){
+        const warning=document.createElement('p');warning.className='mod-warning';
+        warning.textContent='Java change pending until next start or restart.';
+        panel.append(warning);
+      }
+      return panel;
+    }
     async function downloadWorld(s){
       if(busy)return;
       const filename=s.name.replace(/[^A-Za-z0-9_-]+/g,'-')+'-world.zip';
@@ -808,7 +862,7 @@
         const badge=document.createElement('span');badge.className='tag'+(s.is_active?'':' off');badge.textContent=s.is_active?'SELECTED':'INSTALLED';
         title.append(heading,badge);
         const details=document.createElement('p');details.className='muted help';
-        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge':s.mode==='curseforge_zip'?'Custom CurseForge '+s.minecraft_version+' / '+s.loader_type+' / '+s.mod_count+' mod refs / Java '+s.java_version:s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
+        details.textContent=s.ram_gb+' GB RAM'+(s.ram_change_pending?' (applies on next start)':'')+' · '+s.status+' · '+(s.mode==='fabric'?'Fabric '+s.minecraft_version+' / Java '+s.java_version:s.mode==='curseforge'?'CurseForge / Java '+s.java_version+(s.java_change_pending?' (pending)':''):s.mode==='curseforge_zip'?'Custom CurseForge '+s.minecraft_version+' / '+s.loader_type+' / '+s.mod_count+' mod refs / Java '+s.java_version:s.mode==='ftb'?'FTB #'+s.ftb_modpack_id+' / version '+s.ftb_version_id+' / Java '+s.java_version:'Server ZIP')+' · '+(s.whitelist?.length?s.whitelist.join(', '):'no whitelist (legacy profile)');
         const logs=document.createElement('button');logs.className='secondary logsButton';logs.textContent='Logs';
         logs.disabled=busy;
         logs.onclick=async()=>{
@@ -825,6 +879,13 @@
         ramBtn.classList.add('ramButton');
         ramBtn.setAttribute('aria-expanded',String(openRamId===s.id));
         box.append(title,details,logs,playersBtn,ramBtn);
+        if(['curseforge','ftb'].includes(s.mode)){
+          const javaBtn=actionButton('Edit Java runtime','secondary',()=>{
+            openJavaId=openJavaId===s.id?null:s.id;paint();
+          });
+          javaBtn.classList.add('javaButton');
+          box.append(javaBtn,javaPanel(s));
+        }
         const downloadBtn=actionButton('Download World ZIP','secondary',()=>downloadWorld(s),s.status==='running'||s.status==='restarting'||s.status==='paused');
         downloadBtn.classList.add('downloadButton');
         downloadBtn.title=s.status==='running'?'Stop Minecraft first for a consistent world download':'Download this saved world without changing the profile';
@@ -917,6 +978,13 @@
     $('start').onclick=()=>{const s=active();if(s)doAction(s.id,'start')};
     $('stop').onclick=()=>{const s=active();if(s&&confirm('Stop "'+s.name+'"?'))doAction(s.id,'stop')};
     $('restart').onclick=()=>{const s=active();if(s&&confirm('Restart "'+s.name+'"?'))doAction(s.id,'restart')};
+    function updateCfOptions(){
+      const text=$('cfUrl').value.trim();
+      $('cfOptions').hidden=!text;
+      if(/\/all-the-mods-11(?:\/|$)/i.test(text))$('cfJava').value='25';
+    }
+    $('cfUrl').addEventListener('input',updateCfOptions);
+    updateCfOptions();
     function updateFtbOptions(){
       const enabled=!!$('ftbUrl').value.trim();
       $('ftbOptions').hidden=!enabled;
@@ -935,7 +1003,7 @@
         message('Enter the FTB version ID shown on the pack Versions tab.');return;
       }
       setBusy(true);message('Uploading and installing server profile…');
-      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();await refresh(true);message('Server profile installed offline. Select it above and click Make Active when ready. Custom CurseForge exports download referenced mods on first startup.')}
+      try{await request('/servers',{method:'POST',body:form});event.target.reset();updateFtbOptions();updateCfOptions();await refresh(true);message('Server profile installed offline. Select it above and click Make Active when ready. Custom CurseForge exports download referenced mods on first startup.')}
       catch(error){message(error.message)}
       finally{setBusy(false);paint()}
     };
