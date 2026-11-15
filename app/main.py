@@ -210,6 +210,7 @@ def read_properties(meta):
 
 _FTB_MODPACK_PATH=re.compile(r"/modpacks/([1-9][0-9]{0,9})(?:-[a-z0-9-]+)?/?")
 _FTB_VERSIONS={8,17,21,25}
+_CURSEFORGE_VERSIONS={8,17,21,25}
 
 
 def parse_ftb_url(value):
@@ -282,6 +283,28 @@ def pack_source_pending(c,meta):
         return (current.get("TYPE")!="AUTO_CURSEFORGE" or
             current.get("CF_PAGE_URL")!=meta["cf_url"])
     return False
+
+
+def ensure_java_image(meta):
+    """Preflight the requested image *before* stopping any other game.
+
+    Docker's create() does not pull missing images. Make newly installed packs
+    genuinely self-service without requiring the operator to run docker pull.
+    """
+    tag=f"itzg/minecraft-server:java{meta.get('java_version',21)}"
+    try:
+        client.images.get(tag)
+    except docker.errors.ImageNotFound:
+        try:
+            client.images.pull(tag)
+        except docker.errors.DockerException as exc:
+            raise HTTPException(409,
+                f"Cannot download the required Docker image {tag}: {exc}. "
+                "The previous Minecraft server was not stopped.") from exc
+    except docker.errors.DockerException as exc:
+        raise HTTPException(409,
+            f"Cannot check the required Docker image {tag}: {exc}. "
+            "The previous Minecraft server was not stopped.") from exc
 
 
 def get_or_create_container(meta):
@@ -384,6 +407,7 @@ def activate(sid):
     with deployment_lock():
         meta=meta_for(sid)
         check_launch(meta)  # Reject invalid packs BEFORE stopping an active game.
+        ensure_java_image(meta)  # Fetch missing image without disrupting the running server.
         old_running=[(other_id,c) for other_id,c in all_managed()
                      if other_id!=sid and c.status=="running"]
         try:
@@ -444,6 +468,7 @@ def restart_active(sid):
         meta=meta_for(sid)
         c=container_for(sid)
         if not c: raise HTTPException(409,"Server has not been started yet")
+        ensure_java_image(meta)
         try:
             # A normal Docker restart cannot change environment variables.
             # Recreate only when saved settings or RAM differ from the container.
@@ -526,6 +551,9 @@ def state(meta):
                     (mod_compat.runtime_signature(meta),
                      None if not mod_compat.runtime_changes(meta) else ""))),
             "java_version":meta.get("java_version",21),
+            "java_change_pending":bool(c and
+                c.attrs.get("Config",{}).get("Image") and
+                c.attrs["Config"]["Image"]!=f"itzg/minecraft-server:java{meta.get('java_version',21)}"),
             "ftb_modpack_id":meta.get("ftb_modpack_id"),
             "ftb_version_id":meta.get("ftb_version_id"),
             "address":f"{HOST}:{GAME_PORT}"}
@@ -539,7 +567,7 @@ def list_servers(authorization:str|None=Header(None)):
     return [state(json.loads((p/"meta.json").read_text())) for p in ROOT.iterdir() if (p/"meta.json").is_file()]
 
 @app.post("/api/servers")
-async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(...),cf_url:str=Form(""),ftb_url:str=Form(""),ftb_version_id:str=Form(""),ftb_java_version:int=Form(25),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
+async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(...),cf_url:str=Form(""),cf_java_version:int=Form(21),ftb_url:str=Form(""),ftb_version_id:str=Form(""),ftb_java_version:int=Form(25),pack:UploadFile|None=File(None),world:UploadFile|None=File(None),authorization:str|None=Header(None)):
     auth(authorization)
     if not re.fullmatch("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}",name): raise HTTPException(400,"Invalid server name")
     if not 2<=ram_gb<=MAX_RAM: raise HTTPException(400,"Invalid RAM allocation")
@@ -561,6 +589,8 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
         raise HTTPException(400,"Enter 1-50 valid Minecraft Java usernames (3-16 letters, numbers, underscores)")
     whitelist=list(dict.fromkeys(whitelist))
     if cf_url:
+        if cf_java_version not in _CURSEFORGE_VERSIONS:
+            raise HTTPException(400,"CurseForge Java version must be 8, 17, 21, or 25 (ATM11 needs Java 25)")
         url=urlparse(cf_url)
         if url.scheme!="https" or url.hostname not in ("curseforge.com","www.curseforge.com") or not url.path.startswith("/minecraft/modpacks/"):
             raise HTTPException(400,"Invalid CurseForge URL")
@@ -602,6 +632,8 @@ async def create_server(name:str=Form(...),ram_gb:int=Form(6),players:str=Form(.
             meta.update({"ftb_url":ftb_url,"ftb_modpack_id":ftb_pack_id,
                          "ftb_version_id":int(ftb_version_id),
                          "java_version":ftb_java_version})
+        if cf_url:
+            meta["java_version"]=cf_java_version
         if pack: meta.update(detected)
         (root/"meta.json").write_text(json.dumps(meta))
         return state(meta)
@@ -872,6 +904,27 @@ def delete_server(sid:str,confirmation:DeleteServerConfirmation,
                 f"Game container removed, but deleting profile files failed: {exc}. Check the server data folder before retrying.") from exc
 
         return {"deleted":True,"id":sid,"name":meta["name"]}
+
+
+class JavaChange(BaseModel):
+    java_version:Literal[8,17,21,25]
+
+
+@app.patch("/api/servers/{sid}/java")
+def update_java_runtime(sid:str,change:JavaChange,
+                        authorization:str|None=Header(None)):
+    auth(authorization)
+    with deployment_lock():
+        meta=meta_for(sid)
+        if meta.get("mode") not in ("curseforge","ftb"):
+            raise HTTPException(409,"Java runtime editing is supported on CurseForge URL and FTB profiles")
+        if meta.get("java_version",21)==change.java_version:
+            return state(meta)
+        # Store a desired runtime only; never interrupt players on Save.
+        # The new image is fetched before the next actual activation/restart.
+        meta["java_version"]=change.java_version
+        write_meta(meta)
+        return state(meta)
 
 
 class RamChange(BaseModel):
