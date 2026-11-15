@@ -96,6 +96,7 @@ class FakeContainers:
         port=kwargs["ports"]["25565/tcp"]
         c=FakeContainer(self,sid,port,fail_start=sid in self.fail_for)
         c.attrs["Config"]["Env"]=[key+"="+str(val) for key,val in kwargs["environment"].items()]
+        c.attrs["Config"]["Image"]=image
         c.attrs["HostConfig"]["Memory"]=int(kwargs["mem_limit"][:-1])*1024**3
         self.items[sid]=c
         self.creations.append(kwargs)
